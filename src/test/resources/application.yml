@@ -1,0 +1,47 @@
+spring:
+  autoconfigure:
+    # auth-kit 自动装配需要 Redis（session 存储），测试环境无 Redis，排除之；
+    # state-kit 只读取 AuthContext 静态上下文，不依赖 auth-kit 的任何 Bean
+    exclude: io.github.biglv666.authkit.config.AuthKitAutoConfiguration
+  datasource:
+    url: jdbc:h2:mem:statekit;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+
+state-kit:
+  history:
+    enabled: false
+  operator: auto
+  machines:
+    # 主测试状态机：覆盖单源 / 多源 / 守卫 / 动作 / 冲突抛异常
+    order:
+      state-type: io.github.biglv666.statekit.testapp.OrderStatus
+      id-type: java.lang.Long
+      table: t_order
+      status-column: status
+      id-column: id
+      conflict-strategy: throw
+      transitions:
+        - { from: CREATED, event: PAY, to: PAID }
+        - { from: PAID, event: SHIP, to: SHIPPED, action: orderShipAction }
+        - { from: [CREATED, PAID], event: CANCEL, to: CANCELLED, guard: cancelGuard }
+        - { from: SHIPPED, event: SIGN, to: DONE, action: orderSignAction, guard: orderSignGuard }
+    # 冲突策略 log 的状态机 + 自爆动作
+    task:
+      state-type: io.github.biglv666.statekit.testapp.TaskStatus
+      table: t_task
+      conflict-strategy: log
+      transitions:
+        - { from: NEW, event: RUN, to: RUNNING, action: boomAction }
+        - { from: RUNNING, event: FINISH, to: FINISHED }
+        - { from: [NEW, RUNNING], event: ABORT, to: ABORTED }
+    # 同 event 多边（不同 from 不同 to）+ String 主键
+    flow:
+      state-type: io.github.biglv666.statekit.testapp.FlowStatus
+      id-type: java.lang.String
+      table: t_flow
+      id-column: id
+      transitions:
+        - { from: A, event: GO, to: B }
+        - { from: C, event: GO, to: D }

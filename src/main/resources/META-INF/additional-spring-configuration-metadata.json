@@ -1,0 +1,99 @@
+{
+  "hints": [
+    {
+      "name": "state-kit.machines.keys",
+      "values": [],
+      "providers": [
+        {
+          "name": "any"
+        }
+      ]
+    },
+    {
+      "name": "state-kit.machines.<machine>.state-type",
+      "providers": [
+        {
+          "name": "class-reference",
+          "parameters": {
+            "target": "java.lang.Enum",
+            "concrete": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "state-kit.machines.<machine>.id-type",
+      "defaults": ["java.lang.Long"],
+      "providers": [
+        {
+          "name": "class-reference",
+          "parameters": {
+            "target": "java.io.Serializable",
+            "concrete": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "state-kit.machines.<machine>.conflict-strategy",
+      "defaults": ["throw"],
+      "values": [
+        {
+          "value": "throw",
+          "description": "CAS 未命中时抛 StateConflictException（默认，推荐）"
+        },
+        {
+          "value": "log",
+          "description": "CAS 未命中时仅记 WARN 日志，fire 正常返回（静默）"
+        }
+      ]
+    },
+    {
+      "name": "state-kit.machines.<machine>.transitions[].from",
+      "values": [],
+      "providers": [
+        {
+          "name": "any"
+        }
+      ]
+    },
+    {
+      "name": "state-kit.operator",
+      "defaults": ["auto"],
+      "values": [
+        {
+          "value": "auto",
+          "description": "类路径存在 auth-kit 时取 AuthContext 当前用户，否则为空（默认）"
+        },
+        {
+          "value": "none",
+          "description": "强制不填充操作人"
+        }
+      ]
+    },
+    {
+      "name": "state-kit.trace.key",
+      "defaults": ["traceId"],
+      "values": [
+        {
+          "value": "traceId",
+          "description": "micrometer-tracing 日志桥接写入 MDC 的默认键名"
+        }
+      ]
+    },
+    {
+      "name": "state-kit.history.enabled",
+      "defaults": ["false"],
+      "values": [
+        {
+          "value": "false",
+          "description": "完全关闭：零 DDL、零历史 Bean（默认）"
+        },
+        {
+          "value": "true",
+          "description": "启动幂等建表，fire 同事务写入流转历史"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.14</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>io.github.biglv666</groupId>
+    <artifactId>state-kit-spring-boot-starter</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <name>state-kit-spring-boot-starter</name>
+    <description>轻量级声明式状态流转 Starter：业务只在 yml 或 Java DSL 里声明流转规则，框架动态生成状态机 Bean，以 CAS 保证并发正确，以唯一写入口保证状态不被绕改。</description>
+    <url>https://github.com/BIGLV666/state-kit-spring-boot-starter</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>biglv666</id>
+            <name>LV</name>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/BIGLV666/state-kit-spring-boot-starter.git</connection>
+        <url>https://github.com/BIGLV666/state-kit-spring-boot-starter/tree/main</url>
+    </scm>
+
+    <properties>
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!--
+            容器与 JDBC 能力使用方一般自带（spring-boot-starter-jdbc / mybatis 等），
+            这里声明为 provided：编译期可见、不向使用方传递，避免污染使用方版本。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-tx</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
+            四件套适配（全部 optional，类路径检测，缺任何一个都不影响核心功能）：
+            web-common  → 三类状态异常经 @DefaultErrorCode 自动映射统一 Result
+            auth-kit    → AuthContext 自动填充 operatorId
+        -->
+        <dependency>
+            <groupId>io.github.biglv666</groupId>
+            <artifactId>web-common-spring-boot-starter</artifactId>
+            <version>0.3.0</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.github.biglv666</groupId>
+            <artifactId>auth-kit-spring-boot-starter</artifactId>
+            <version>0.1.0</version>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- 测试 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
