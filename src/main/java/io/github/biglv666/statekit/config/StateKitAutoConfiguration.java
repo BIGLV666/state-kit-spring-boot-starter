@@ -10,11 +10,13 @@ import io.github.biglv666.statekit.history.JdbcHistoryRecorder;
 import io.github.biglv666.statekit.store.StateStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigureAfter;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration;
 import org.springframework.boot.autoconfigure.transaction.TransactionAutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnSingleCandidate;
@@ -125,6 +127,72 @@ public class StateKitAutoConfiguration {
     public HistoryQueryService historyQueryService(DataSource dataSource, StateKitProperties properties) {
         return new HistoryQueryService(new JdbcTemplate(dataSource),
                 properties.getHistory().getTableName());
+    }
+
+    /**
+     * BYPASS 监视清单：Registrar 启动期登记机器，装饰器读取。始终注册（开销可忽略），
+     * 装饰器本身按 bypass.mode 条件装配。
+     */
+    @Bean
+    public io.github.biglv666.statekit.bypass.BypassWatchlist bypassWatchlist() {
+        return new io.github.biglv666.statekit.bypass.BypassWatchlist();
+    }
+
+    /**
+     * BYPASS 数据源装饰器（0.2.0+）：仅当 bypass.mode 为 log / event 时装配，
+     * 默认 off 时容器内不存在本 Bean、DataSource 零包装。
+     */
+    @Bean
+    public static io.github.biglv666.statekit.bypass.BypassDataSourceDecorator bypassDataSourceDecorator(
+            StateKitProperties properties,
+            io.github.biglv666.statekit.bypass.BypassWatchlist watchlist,
+            ApplicationEventPublisher eventPublisher,
+            ObjectProvider<OperatorResolver> operatorResolver,
+            ObjectProvider<TraceIdResolver> traceIdResolver) {
+        String mode = properties.getBypass().getMode() == null
+                ? "off" : properties.getBypass().getMode().toLowerCase().trim();
+        if ("off".equals(mode)) {
+            // off：零包装透传（Bean 仍注册，保证装配路径统一）
+            return new io.github.biglv666.statekit.bypass.BypassDataSourceDecorator(null);
+        }
+        boolean publish = "event".equals(mode);
+        if (!publish && !"log".equals(mode)) {
+            throw new IllegalStateException("state-kit.bypass.mode 非法: [" + mode + "]，只支持 off / log / event");
+        }
+        var matcher = new io.github.biglv666.statekit.bypass.BypassSqlMatcher(
+                watchlist, eventPublisher,
+                operatorResolver.getIfAvailable(), traceIdResolver.getIfAvailable(), publish);
+        return new io.github.biglv666.statekit.bypass.BypassDataSourceDecorator(matcher);
+    }
+
+    /**
+     * 状态停留时长统计服务（0.2.0+）：随历史模块一同装配（history.enabled=true）。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "state-kit.history", name = "enabled", havingValue = "true")
+    @ConditionalOnSingleCandidate(DataSource.class)
+    public io.github.biglv666.statekit.history.HistoryDwellService historyDwellService(
+            DataSource dataSource, StateKitProperties properties) {
+        return new io.github.biglv666.statekit.history.HistoryDwellService(
+                new JdbcTemplate(dataSource), properties.getHistory().getTableName());
+    }
+
+    /**
+     * 响应式历史写入器（0.2.0+）：history.enabled=true 且容器有 DatabaseClient 时装配，
+     * 供 Reactive 状态机使用。
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "state-kit.history", name = "enabled", havingValue = "true")
+    @ConditionalOnClass(name = "org.springframework.r2dbc.core.DatabaseClient")
+    public io.github.biglv666.statekit.history.ReactiveHistoryRecorder reactiveHistoryRecorder(
+            org.springframework.beans.factory.ObjectProvider<org.springframework.r2dbc.core.DatabaseClient> databaseClient,
+            StateKitProperties properties) {
+        var client = databaseClient.getIfAvailable();
+        if (client == null) {
+            return record -> reactor.core.publisher.Mono.empty();
+        }
+        return new io.github.biglv666.statekit.history.R2dbcHistoryRecorder(
+                client, properties.getHistory().getTableName());
     }
 
     /** auth-kit 类路径检测辅助（避免在本类 import auth-kit 类） */

@@ -21,3 +21,25 @@ CREATE TABLE IF NOT EXISTS t_order2 (
     id BIGINT PRIMARY KEY,
     status VARCHAR(32)
 );
+
+CREATE TABLE IF NOT EXISTS t_orderv (
+    id BIGINT PRIMARY KEY,
+    status VARCHAR(32),
+    version BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS t_retry (
+    id BIGINT PRIMARY KEY,
+    status VARCHAR(32)
+);
+
+CREATE TABLE IF NOT EXISTS t_wf (
+    id BIGINT PRIMARY KEY,
+    status VARCHAR(32)
+);
+
+CREATE TABLE IF NOT EXISTS t_wf_item (
+    id BIGINT PRIMARY KEY,
+    status VARCHAR(32),
+    workflow_id BIGINT NOT NULL
+);

@@ -75,6 +75,27 @@ public interface StateMachine<S, ID> {
     void fire(ID id, String event, FireArg... args);
 
     /**
+     * 带 {@link FireOptions} 的 fire 重载（0.2.0+）：
+     * 如 {@code FireOptions.skipHistory()} 单次豁免历史记录。
+     */
+    default void fire(ID id, String event, FireOptions options, FireArg... args) {
+        fire(id, event, args);
+    }
+
+    /**
+     * 无冲突异常的 fire（0.2.0+）：语义与 {@link #fire(Object, String, FireArg...)}
+     * 完全一致，唯独 CAS 未命中时不抛 {@code StateConflictException} 而是返回 false——
+     * 调用方可感知冲突又不被迫 try-catch；非法流转与守卫拒绝仍照常抛出（确定性错误不该静默）。
+     * 配置了自动重试时先重试，重试耗尽仍未命中才返回 false。
+     *
+     * @return true 流转成功；false CAS 冲突（含重试耗尽）
+     */
+    default boolean tryFire(ID id, String event, FireArg... args) {
+        fire(id, event, args);
+        return true;
+    }
+
+    /**
      * 查询实体当前状态。
      *
      * @param id 实体主键

@@ -51,6 +51,8 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
     private static final Logger log = LoggerFactory.getLogger(StateMachineRegistrar.class);
 
     private Environment environment;
+    /** 启动期构建的全部机器运行时（含父机器运行时，供嵌套聚合器在实例化时引用） */
+    private final Map<String, MachineRuntime<?>> buildRuntimes = new LinkedHashMap<>();
     /** 容器事件发布器（即应用上下文），由自动装配注入 */
     private final ApplicationEventPublisher eventPublisher;
 
@@ -100,9 +102,27 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
             return;
         }
 
-        // 3. 逐个校验（fail fast）
+        // 3. 逐个校验（fail fast，含跨机器校验：嵌套父机器、回发边、父链成环）
         for (MachineDefinition definition : definitions.values()) {
-            DefinitionValidator.validate(definition, beanFactory);
+            DefinitionValidator.validate(definition, definitions, beanFactory);
+        }
+
+        // 3.5 BYPASS 监视清单登记（装饰器仅在 mode != off 时装配）
+        io.github.biglv666.statekit.bypass.BypassWatchlist watchlist = beanFactory
+                .getBeanProvider(io.github.biglv666.statekit.bypass.BypassWatchlist.class)
+                .getIfAvailable();
+        if (watchlist != null) {
+            definitions.values().forEach(watchlist::register);
+        }
+
+        // 3.6 嵌套聚合依赖 JDBC 统计：声明了 sub 的机器不允许与自定义 StateStore Bean 共存
+        if (beanFactory.getBeanNamesForType(StateStore.class, false, false).length > 0) {
+            for (MachineDefinition definition : definitions.values()) {
+                if (definition.getSubBinding() != null) {
+                    throw new IllegalStateException("状态机 [%s] 嵌套子机器聚合依赖默认 JDBC 存储，"
+                            + "不能与自定义 StateStore Bean 共存".formatted(definition.getName()));
+                }
+            }
         }
 
         // 4. 注册动态 Bean
@@ -111,10 +131,17 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
         }
         for (MachineDefinition definition : definitions.values()) {
             MachineRuntime<?> runtime = buildRuntime(definition);
+            buildRuntimes.put(definition.getName(), runtime);
             registerMachineBean(registry, beanFactory, runtime, dslDefinitionBeanNames);
             log.info("state-kit 已注册状态机 [{}] -> 泛型 StateMachine<{}, {}>",
                     definition.getName(), definition.getStateType().getSimpleName(),
                     definition.getIdType().getSimpleName());
+            if (definition.isReactive()) {
+                registerReactiveMachineBean(registry, beanFactory, runtime, dslDefinitionBeanNames);
+                log.info("state-kit 已注册 Reactive 状态机 [{}]Reactive -> 泛型 ReactiveStateMachine<{}, {}>",
+                        definition.getName(), definition.getStateType().getSimpleName(),
+                        definition.getIdType().getSimpleName());
+            }
         }
     }
 
@@ -151,6 +178,9 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
         beanDefinition.setRole(BeanDefinition.ROLE_APPLICATION);
         beanDefinition.setInstanceSupplier(() -> createMachine(beanFactory, runtime));
         beanDefinition.setAttribute("factoryBeanObjectType", DefaultStateMachine.class.getName());
+        // reactive 机器同时存在阻塞 Bean：无 JDBC 环境的纯 Reactive 应用里阻塞 Bean 永不注入，
+        // 设为懒加载避免 preInstantiateSingletons 强制创建
+        beanDefinition.setLazyInit(definition.isReactive());
 
         String beanName = definition.getName();
         boolean overwritingDslDefinition = dslDefinitionBeanNames.contains(beanName);
@@ -185,7 +215,8 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
             stateStore = new JdbcStateStore(resolveJdbcTemplate(beanFactory, dataSource),
                     runtime.getDefinition().getTable(),
                     runtime.getDefinition().getStatusColumn(),
-                    runtime.getDefinition().getIdColumn());
+                    runtime.getDefinition().getIdColumn(),
+                    runtime.getDefinition().getVersionColumn());
         }
 
         TransactionTemplate transactionTemplate = null;
@@ -197,10 +228,93 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
         HistoryRecorder historyRecorder = beanFactory.getBeanProvider(HistoryRecorder.class)
                 .getIfAvailable();
 
+        // 嵌套子机器：装配聚合器（聚合判定走 JDBC 统计，父回发走父机器常规 fire）
+        io.github.biglv666.statekit.nested.SubMachineAggregator aggregator = null;
+        if (runtime.getDefinition().getSubBinding() != null) {
+            MachineRuntime<?> parentRuntime = buildRuntimes.get(runtime.getDefinition().getSubBinding().parent());
+            StateMachine<?, ?> parent = (StateMachine<?, ?>) beanFactory.getBean(
+                    runtime.getDefinition().getSubBinding().parent());
+            aggregator = new io.github.biglv666.statekit.nested.SubMachineAggregator(
+                    resolveJdbcTemplate(beanFactory, beanFactory.getBean(DataSource.class)),
+                    runtime, runtime.getDefinition().getSubBinding(), parentRuntime, parent);
+        }
+
         return new DefaultStateMachine(
                 runtime,
                 stateStore,
                 transactionTemplate,
+                beanFactory.getBeanProvider(OperatorResolver.class).getIfAvailable(),
+                beanFactory.getBeanProvider(TraceIdResolver.class).getIfAvailable(),
+                historyRecorder,
+                eventPublisher,
+                beanFactory,
+                aggregator);
+    }
+
+    /**
+     * 注册 Reactive 状态机动态 Bean（0.2.0+）：bean 名 = machine 名 + Reactive 后缀，
+     * targetType 为 {@code ReactiveStateMachine<S, ID>}。
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void registerReactiveMachineBean(BeanDefinitionRegistry registry,
+                                             ConfigurableListableBeanFactory beanFactory,
+                                             MachineRuntime runtime,
+                                             java.util.Set<String> dslDefinitionBeanNames) {
+        MachineDefinition definition = runtime.getDefinition();
+        String beanName = definition.getName() + "Reactive";
+        if (registry.containsBeanDefinition(beanName)) {
+            throw new IllegalStateException("Reactive 状态机 [%s] 的 Bean 名与容器已有 Bean 冲突".formatted(beanName));
+        }
+
+        RootBeanDefinition beanDefinition = new RootBeanDefinition();
+        beanDefinition.setTargetType(ResolvableType.forClassWithGenerics(
+                io.github.biglv666.statekit.ReactiveStateMachine.class,
+                definition.getStateType(), definition.getIdType()));
+        beanDefinition.setBeanClassName(io.github.biglv666.statekit.core.DefaultReactiveStateMachine.class.getName());
+        beanDefinition.setRole(BeanDefinition.ROLE_APPLICATION);
+        beanDefinition.setInstanceSupplier(() -> createReactiveMachine(beanFactory, runtime));
+        beanDefinition.setAttribute("factoryBeanObjectType",
+                io.github.biglv666.statekit.core.DefaultReactiveStateMachine.class.getName());
+        registry.registerBeanDefinition(beanName, beanDefinition);
+    }
+
+    /**
+     * 组装 Reactive 状态机实例。存储解析：自定义 {@code ReactiveStateStore} Bean（SPI）
+     * → 按声明构造 {@code R2dbcStateStore}（需要容器 DatabaseClient）。
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private io.github.biglv666.statekit.core.DefaultReactiveStateMachine createReactiveMachine(
+            ConfigurableListableBeanFactory beanFactory, MachineRuntime runtime) {
+        io.github.biglv666.statekit.store.ReactiveStateStore stateStore = beanFactory
+                .getBeanProvider(io.github.biglv666.statekit.store.ReactiveStateStore.class)
+                .getIfAvailable();
+        if (stateStore == null) {
+            org.springframework.r2dbc.core.DatabaseClient databaseClient = beanFactory
+                    .getBeanProvider(org.springframework.r2dbc.core.DatabaseClient.class)
+                    .getIfAvailable();
+            if (databaseClient == null) {
+                throw new IllegalStateException("状态机 [%s] 声明了 reactive=true，但容器中没有 "
+                                + "ReactiveStateStore Bean，也没有 DatabaseClient（请引入 spring-boot-starter-data-r2dbc 并配置 R2DBC 数据源）"
+                        .formatted(runtime.name()));
+            }
+            stateStore = new io.github.biglv666.statekit.store.R2dbcStateStore(databaseClient,
+                    runtime.getDefinition().getTable(),
+                    runtime.getDefinition().getStatusColumn(),
+                    runtime.getDefinition().getIdColumn());
+        }
+
+        org.springframework.transaction.reactive.TransactionalOperator transactionalOperator = beanFactory
+                .getBeanProvider(org.springframework.transaction.reactive.TransactionalOperator.class)
+                .getIfAvailable();
+
+        io.github.biglv666.statekit.history.ReactiveHistoryRecorder historyRecorder = beanFactory
+                .getBeanProvider(io.github.biglv666.statekit.history.ReactiveHistoryRecorder.class)
+                .getIfAvailable();
+
+        return new io.github.biglv666.statekit.core.DefaultReactiveStateMachine(
+                runtime,
+                stateStore,
+                transactionalOperator,
                 beanFactory.getBeanProvider(OperatorResolver.class).getIfAvailable(),
                 beanFactory.getBeanProvider(TraceIdResolver.class).getIfAvailable(),
                 historyRecorder,

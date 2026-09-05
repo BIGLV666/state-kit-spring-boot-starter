@@ -2,6 +2,8 @@
 
 轻量级**声明式状态流转** Spring Boot Starter：业务只在 yml（或 Java DSL）里声明流转规则，框架启动时动态生成状态机 Bean；以数据库 **CAS 条件更新**保证并发正确，以**唯一写入口**保证状态不被绕改。**核心零建表、零业务流程类、零必选依赖。**
 
+> **0.2.0 新增**：冲突自动重试、乐观锁双保险（version 列）、`skipHistory`/`tryFire` 重载、状态停留时长统计、BYPASS 绕改检测、嵌套子状态机（会签/或签/满 n 放行）、Reactive/WebFlux 通道（R2DBC）。见第九节。
+
 ```
 business ──fire(id, event, args)──▶ StateMachine（框架生成的 Bean）
                                         │ 读当前态 → 路由 → 守卫
@@ -307,7 +309,7 @@ public StateStore redisStateStore() {
 
 ## 十一、测试
 
-`src/test` 覆盖 55 个用例（H2 内存库，`mvnw test` 一键运行），包括：
+`src/test` 覆盖 80 个用例（H2 内存库，`mvnw test` 一键运行），包括：
 
 - **并发双流转**（8 线程同 fire，CAS 保证恰好一成一败）；
 - **竞态窗口精确复现**（未提交事务持锁 + 另一线程 fire，CAS 阻塞后 WHERE 重评）；
@@ -318,15 +320,117 @@ public StateStore redisStateStore() {
 - history 关闭零 DDL / 开启自动建表 / 建表幂等 / 历史与业务同事务回滚 / 轨迹查询；
 - 启动期校验每种错误形态（11 例）、自定义 StateStore SPI 整体替换、无登录态/无链路降级路径。
 
-## 十二、版本路线
+## 十二、0.2.0 新特性详解
 
-- **V1.5**：状态停留时长统计（基于历史表）、可选乐观锁双保险（业务表带 version 列）、冲突自动重试策略（可配次数）、`fire` 的 skipHistory 重载；
-- **V2**：BYPASS 绕改检测（与 data-audit 共用变更捕获底座）、嵌套子状态机（会签/或签）、Reactive/WebFlux 支持。
+### 1. 冲突自动重试（retry）
 
-## 十三、已知限制
+CAS 未命中后事务内重读状态 → **重新解析路由** → 重跑守卫 → 再 CAS（动作只在成功后执行一次）。重试的价值在于"以最新状态继续推进"——例如本想 `A --GO--> B`，CAS 时发现已被并发推进到 B，重试解析出 `B --GO--> D` 并直接完成：
+
+```yaml
+machines:
+  retryFlow:
+    conflict-strategy: throw      # 重试仅 throw 策略生效
+    retry:
+      max-attempts: 3             # 总尝试次数（含首次）
+      backoff-ms: 200             # 每次重试前等待
+```
+
+重试耗尽仍未命中按 conflict-strategy 处置（抛 StateConflictException / log 静默）。Java DSL：`.retry(3, 200)`。
+
+### 2. 乐观锁双保险（version-column）
+
+业务表有 version 列时启用：CAS 变为 `UPDATE ... SET status=?, version=version+1 WHERE id=? AND status=? AND version=?`，version 与状态同次读出。状态之外的字段被并发修改也能察觉：
+
+```yaml
+orderv:
+  table: t_orderv
+  version-column: version
+```
+
+### 3. skipHistory 与 tryFire
+
+```java
+// 单次豁免历史记录（状态照常变更，history.enabled=false 时无效果）
+orderFlow.fire(orderId, "PAY", FireOptions.skipHistory(), set("pay_no", txnNo));
+
+// 冲突返回 false 而不抛异常（非法流转/守卫拒绝仍抛出——确定性错误不该静默）
+if (orderFlow.tryFire(orderId, "PAY")) { ... }
+```
+
+### 4. 状态停留时长统计
+
+```java
+@Autowired HistoryDwellService dwellService;
+
+// 各状态平均/最大停留、未离开时长（按平均停留降序）
+List<HistoryDwellService.StateDwell> stats = dwellService.stats("order");
+List<HistoryDwellService.StateDwell> one = dwellService.stats("order", orderId);
+```
+
+口径：第 i 条历史记录的 `to_state` 停留 = 第 i+1 条时间 − 第 i 条时间；最后一段为"未完成停留"。实体在初始状态（首次流转前）的停留不计入。随 history.enabled 装配。
+
+### 5. BYPASS 绕改检测（默认 off）
+
+拦截**绕过 fire 直接 UPDATE 业务表 status 列**的语句：装饰容器 DataSource，命中即 WARN 日志（`event` 模式另发 `StateBypassDetectedEvent`，监听方自行决定告警/阻断策略）：
+
+```yaml
+state-kit:
+  bypass:
+    mode: off        # off（默认，零开销）/ log / event
+```
+
+边界：只观测经容器 DataSource 执行的语句；框架自己的 CAS 通过 FireContext 标记豁免；Reactive 通道不参与检测。
+
+### 6. 嵌套子状态机（会签 / 或签 / 满 n 放行）
+
+子机器声明 `sub` 绑定后，子项流转到终态时按策略聚合父实体下全部子项，满足则自动对父实体回发事件（同事务）：
+
+```yaml
+machines:
+  wf:                                 # 父机器
+    transitions:
+      - { from: NEW,       event: START,  to: REVIEWING }
+      - { from: REVIEWING, event: ALL_OK, to: APPROVED }
+  wfItem:                             # 子机器
+    sub:
+      parent: wf
+      parent-state: REVIEWING
+      group-column: workflow_id       # 子项表中指向父实体主键的列
+      strategy: all                   # all=会签 / any=或签 / count=满 n 个
+      on-complete-event: ALL_OK
+    transitions:
+      - { from: PENDING, event: OK, to: DONE }
+```
+
+回发前预检父实体存在性与回发边有效性，不满足 WARN 跳过（不污染子项事务）；预检通过后仍被并发推进则按父机器 conflict-strategy 处置。限制：仅默认 JDBC 存储；不支持 reactive 通道；父链不允许成环（启动期校验）。
+
+### 7. Reactive/WebFlux 通道
+
+与阻塞通道语义一致、实现隔离：`ReactiveStateMachine<S, ID>`（`Mono<Void> fire` 等）、`ReactiveStateStore` SPI（默认 `R2dbcStateStore`）、`ReactiveStateAction/ReactiveStateGuard` 钩子、事务走 `TransactionalOperator`。机器声明 `reactive: true` 时额外注册 bean 名为 `<machine名>Reactive` 的响应式 Bean（阻塞 Bean 转懒加载，纯 R2DBC 应用可正常启动）：
+
+```java
+StateMachine.define("reactiveOrder", ReactiveTestStatus.class)
+        .table("t_reactive", "status", "id")
+        .reactive()
+        .transition(CREATED, PAID, "PAY")
+        .guard("reactivePayGuard")     // ReactiveStateGuard：Mono<Boolean>
+        .action("reactivePayAction")   // ReactiveStateAction：Mono<Void>，业务写用 R2DBC
+        .build();
+```
+
+需要使用方自带 `spring-boot-starter-data-r2dbc` + 驱动（如 r2dbc-h2）。限制：嵌套聚合与 BYPASS 检测不适用于本通道；operatorId 依赖 ThreadLocal 的 auth-kit 在纯 WebFlux 下为 null。
+
+## 十三、版本路线
+
+- **V1.5**（✅ 0.2.0 已交付）：状态停留时长统计、乐观锁双保险、冲突自动重试、skipHistory/tryFire 重载
+- **V2**（✅ 0.2.0 已交付）：BYPASS 绕改检测、嵌套子状态机（会签/或签/count）、Reactive/WebFlux 支持
+- **后续候选**：tryFire 批量补偿 API、状态机可视化导出（DOT/Mermaid）、与 data-audit 的 binlog 级 BYPASS 合流
+
+## 十四、已知限制
 
 - 状态机 Bean 在启动期注册，不支持运行期增删流转规则（改 yml 重启即可）；
 - Java DSL 定义 Bean 会被提前实例化，不能注入业务 Bean；
-- `fire` 的 void 返回值 + `conflict-strategy: log` 组合会静默吞掉冲突，调用方无感知（V1.5 提供 `tryFire` 返回式重载）；
+- Reactive 通道不参与 BYPASS 检测与嵌套聚合；operatorId 在纯 WebFlux 下为 null（auth-kit 基于 ThreadLocal）；
 - 历史表 DDL 内置方言：MySQL/MariaDB 与标准（H2/PostgreSQL）两类，其它数据库未验证；
-- 不支持在同一事件上对同一状态挂不同目标（`(from, event)` 唯一性校验会拦截）。
+- 不支持在同一事件上对同一状态挂不同目标（`(from, event)` 唯一性校验会拦截）；
+- BYPASS 检测只覆盖经容器 DataSource 执行的语句；binlog 级检测留给 data-audit 合流。

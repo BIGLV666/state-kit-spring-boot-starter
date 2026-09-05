@@ -43,6 +43,9 @@ public class StateKitProperties {
     /** 链路追踪配置，见 {@link TraceProperties} */
     private final TraceProperties trace = new TraceProperties();
 
+    /** BYPASS 绕改检测配置，见 {@link BypassProperties}（0.2.0+） */
+    private final BypassProperties bypass = new BypassProperties();
+
     /** 状态机声明，key 为状态机名（即 Bean 名） */
     private Map<String, MachineProperties> machines = new LinkedHashMap<>();
 
@@ -60,6 +63,10 @@ public class StateKitProperties {
 
     public TraceProperties getTrace() {
         return trace;
+    }
+
+    public BypassProperties getBypass() {
+        return bypass;
     }
 
     public Map<String, MachineProperties> getMachines() {
@@ -115,6 +122,27 @@ public class StateKitProperties {
 
         public void setKey(String key) {
             this.key = key;
+        }
+    }
+
+    /**
+     * BYPASS 绕改检测配置（0.2.0+）：拦截绕过 fire 直接 UPDATE 业务表 status 列的语句。
+     * 默认 off——老用户升级零行为变化；开启后通过装饰容器 DataSource 实现，零业务侵入。
+     */
+    public static class BypassProperties {
+
+        /**
+         * 检测模式：{@code off}（默认，不启用）；{@code log} = 命中仅 WARN 日志；
+         * {@code event} = WARN 日志 + 发布 {@code StateBypassDetectedEvent}。
+         */
+        private String mode = "off";
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
         }
     }
 }

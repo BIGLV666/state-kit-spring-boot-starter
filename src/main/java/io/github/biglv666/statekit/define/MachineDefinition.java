@@ -18,10 +18,28 @@ public final class MachineDefinition {
     private final String idColumn;
     private final ConflictStrategy conflictStrategy;
     private final List<TransitionSpec> transitions;
+    /** 乐观锁版本列，未启用为 null（0.2.0+） */
+    private final String versionColumn;
+    /** 冲突自动重试策略，null = 不重试（0.2.0+） */
+    private final RetryPolicy retry;
+    /** 嵌套子机器绑定，null = 独立机器（0.2.0+） */
+    private final SubMachineBinding subBinding;
+    /** 是否同时注册 Reactive 状态机（0.2.0+） */
+    private final boolean reactive;
 
     public MachineDefinition(String name, Class<? extends Enum<?>> stateType, Class<?> idType,
                              String table, String statusColumn, String idColumn,
                              ConflictStrategy conflictStrategy, List<TransitionSpec> transitions) {
+        this(name, stateType, idType, table, statusColumn, idColumn,
+                conflictStrategy, transitions, null, null, null, false);
+    }
+
+    /** 0.2.0+ 全参构造 */
+    public MachineDefinition(String name, Class<? extends Enum<?>> stateType, Class<?> idType,
+                             String table, String statusColumn, String idColumn,
+                             ConflictStrategy conflictStrategy, List<TransitionSpec> transitions,
+                             String versionColumn, RetryPolicy retry,
+                             SubMachineBinding subBinding, boolean reactive) {
         this.name = name;
         this.stateType = stateType;
         this.idType = idType;
@@ -30,6 +48,10 @@ public final class MachineDefinition {
         this.idColumn = idColumn;
         this.conflictStrategy = conflictStrategy;
         this.transitions = List.copyOf(transitions);
+        this.versionColumn = versionColumn;
+        this.retry = retry;
+        this.subBinding = subBinding;
+        this.reactive = reactive;
     }
 
     /** 状态机名，即 Bean 名，全局唯一 */
@@ -70,5 +92,25 @@ public final class MachineDefinition {
     /** 流转规则列表 */
     public List<TransitionSpec> getTransitions() {
         return transitions;
+    }
+
+    /** 乐观锁版本列，未启用为 null（0.2.0+） */
+    public String getVersionColumn() {
+        return versionColumn;
+    }
+
+    /** 冲突自动重试策略，null = 不重试（0.2.0+） */
+    public RetryPolicy getRetry() {
+        return retry;
+    }
+
+    /** 嵌套子机器绑定，null = 独立机器（0.2.0+） */
+    public SubMachineBinding getSubBinding() {
+        return subBinding;
+    }
+
+    /** 是否同时注册 Reactive 状态机（0.2.0+） */
+    public boolean isReactive() {
+        return reactive;
     }
 }

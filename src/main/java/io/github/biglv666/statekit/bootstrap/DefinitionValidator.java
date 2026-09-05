@@ -32,10 +32,12 @@ final class DefinitionValidator {
      * 校验单个状态机定义。
      *
      * @param definition  定义模型
+     * @param all         全部机器定义（跨机器校验：嵌套父机器、回发边）
      * @param beanFactory 用于检查 action/guard bean 存在性
      * @throws IllegalStateException 任一校验不通过
      */
-    static void validate(MachineDefinition definition, ConfigurableListableBeanFactory beanFactory) {
+    static void validate(MachineDefinition definition, java.util.Map<String, MachineDefinition> all,
+                         ConfigurableListableBeanFactory beanFactory) {
         String machine = definition.getName();
 
         if (definition.getStateType() == null || !definition.getStateType().isEnum()) {
@@ -48,6 +50,13 @@ final class DefinitionValidator {
         requireIdentifier(machine, "table", definition.getTable());
         requireIdentifier(machine, "status-column", definition.getStatusColumn());
         requireIdentifier(machine, "id-column", definition.getIdColumn());
+        if (definition.getVersionColumn() != null) {
+            requireIdentifier(machine, "version-column", definition.getVersionColumn());
+        }
+        if (definition.getRetry() != null && definition.getConflictStrategy()
+                != io.github.biglv666.statekit.ConflictStrategy.THROW) {
+            throw new IllegalStateException("状态机 [%s] 的 retry 仅在 conflict-strategy=throw 时生效".formatted(machine));
+        }
 
         if (definition.getTransitions().isEmpty()) {
             throw new IllegalStateException("状态机 [%s] 未声明任何流转（transitions）".formatted(machine));
@@ -82,9 +91,17 @@ final class DefinitionValidator {
                 throw new IllegalStateException("状态机 [%s] 流转 %s 的 to 状态 [%s] 不在枚举 %s 中"
                         .formatted(machine, spec, spec.getTo(), definition.getStateType().getName()));
             }
-            checkHookBean(machine, spec, spec.getAction(), StateAction.class, true, beanFactory);
-            checkHookBean(machine, spec, spec.getGuard(), StateGuard.class, false, beanFactory);
+            // reactive 机器挂响应式钩子，阻塞机器挂阻塞钩子
+            Class<?> actionType = definition.isReactive()
+                    ? io.github.biglv666.statekit.ReactiveStateAction.class : StateAction.class;
+            Class<?> guardType = definition.isReactive()
+                    ? io.github.biglv666.statekit.ReactiveStateGuard.class : StateGuard.class;
+            checkHookBean(machine, spec, spec.getAction(), actionType, true, beanFactory);
+            checkHookBean(machine, spec, spec.getGuard(), guardType, false, beanFactory);
         }
+
+        validateSubBinding(definition, all);
+        validateParentChain(definition, all, new HashSet<>());
 
         // 可达性告警（非错误）：无任何入边的状态，若同时有出边，通常是预期起点；孤立状态提示可能漏声明
         Set<String> reachable = new HashSet<>();
@@ -103,6 +120,65 @@ final class DefinitionValidator {
         if (value == null || !value.matches(IDENTIFIER)) {
             throw new IllegalStateException("状态机 [%s] 的 %s 非法: [%s]，必须是合法 SQL 标识符（字母开头，仅含字母/数字/下划线）"
                     .formatted(machine, what, value));
+        }
+    }
+
+    /** 嵌套子机器绑定的结构校验（父机器存在、父状态挂载、回发边存在、列名合法） */
+    private static void validateSubBinding(MachineDefinition definition, java.util.Map<String, MachineDefinition> all) {
+        io.github.biglv666.statekit.define.SubMachineBinding sub = definition.getSubBinding();
+        if (sub == null) {
+            return;
+        }
+        if (definition.isReactive()) {
+            throw new IllegalStateException("状态机 [%s] 嵌套子机器（sub）不支持 reactive 通道，二者只能取其一"
+                    .formatted(definition.getName()));
+        }
+        requireIdentifier(definition.getName(), "sub.group-column", sub.groupColumn());
+        if (sub.onCompleteEvent() == null || sub.onCompleteEvent().isBlank()) {
+            throw new IllegalStateException("状态机 [%s] 的 sub.on-complete-event 不能为空".formatted(definition.getName()));
+        }
+        MachineDefinition parent = all.get(sub.parent());
+        if (parent == null) {
+            throw new IllegalStateException("状态机 [%s] 的 sub.parent [%s] 不存在"
+                    .formatted(definition.getName(), sub.parent()));
+        }
+        boolean parentStateKnown = false;
+        for (Object constant : parent.getStateType().getEnumConstants()) {
+            if (((Enum<?>) constant).name().equals(sub.parentState())) {
+                parentStateKnown = true;
+                break;
+            }
+        }
+        if (!parentStateKnown) {
+            throw new IllegalStateException("状态机 [%s] 的 sub.parent-state [%s] 不在父机器 [%s] 的枚举中"
+                    .formatted(definition.getName(), sub.parentState(), sub.parent()));
+        }
+        // 回发边必须在父机器的 parent-state 上存在
+        boolean edgeExists = parent.getTransitions().stream()
+                .anyMatch(t -> t.getFrom().contains(sub.parentState()) && t.getEvent().equals(sub.onCompleteEvent()));
+        if (!edgeExists) {
+            throw new IllegalStateException("状态机 [%s] 的 sub.on-complete-event [%s] 在父机器 [%s] 的状态 [%s] 上没有出边"
+                    .formatted(definition.getName(), sub.onCompleteEvent(), sub.parent(), sub.parentState()));
+        }
+        if (sub.strategy() == io.github.biglv666.statekit.define.SubMachineBinding.Strategy.COUNT && sub.count() <= 0) {
+            throw new IllegalStateException("状态机 [%s] 的 sub.strategy=count 时 sub.count 必须为正整数"
+                    .formatted(definition.getName()));
+        }
+    }
+
+    /** 父机器链不允许成环 */
+    private static void validateParentChain(MachineDefinition definition,
+                                            java.util.Map<String, MachineDefinition> all, Set<String> visited) {
+        io.github.biglv666.statekit.define.SubMachineBinding sub = definition.getSubBinding();
+        if (sub == null) {
+            return;
+        }
+        if (!visited.add(definition.getName())) {
+            throw new IllegalStateException("嵌套子状态机出现循环: " + visited + " -> " + definition.getName());
+        }
+        MachineDefinition parent = all.get(sub.parent());
+        if (parent != null) {
+            validateParentChain(parent, all, visited);
         }
     }
 

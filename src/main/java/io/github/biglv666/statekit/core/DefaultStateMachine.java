@@ -2,11 +2,13 @@ package io.github.biglv666.statekit.core;
 
 import io.github.biglv666.statekit.ConflictStrategy;
 import io.github.biglv666.statekit.FireArg;
+import io.github.biglv666.statekit.FireOptions;
 import io.github.biglv666.statekit.StateAction;
 import io.github.biglv666.statekit.StateGuard;
 import io.github.biglv666.statekit.StateMachine;
 import io.github.biglv666.statekit.StateTx;
 import io.github.biglv666.statekit.context.OperatorResolver;
+import io.github.biglv666.statekit.define.RetryPolicy;
 import io.github.biglv666.statekit.define.TransitionSpec;
 import io.github.biglv666.statekit.event.StateTransitedEvent;
 import io.github.biglv666.statekit.exception.EntityNotFoundException;
@@ -15,6 +17,7 @@ import io.github.biglv666.statekit.exception.IllegalTransitionException;
 import io.github.biglv666.statekit.exception.StateConflictException;
 import io.github.biglv666.statekit.history.HistoryRecorder;
 import io.github.biglv666.statekit.history.HistoryRecord;
+import io.github.biglv666.statekit.store.StateAndVersion;
 import io.github.biglv666.statekit.store.StateStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,6 +73,19 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
                                HistoryRecorder historyRecorder,
                                ApplicationEventPublisher eventPublisher,
                                ConfigurableListableBeanFactory beanFactory) {
+        this(runtime, stateStore, transactionTemplate, operatorResolver, traceIdResolver,
+                historyRecorder, eventPublisher, beanFactory, null);
+    }
+
+    /** 0.2.0+：嵌套子机器机器需传入聚合器（父机器回发用） */
+    public DefaultStateMachine(MachineRuntime<S> runtime, StateStore stateStore,
+                               TransactionTemplate transactionTemplate,
+                               OperatorResolver operatorResolver,
+                               io.github.biglv666.statekit.context.TraceIdResolver traceIdResolver,
+                               HistoryRecorder historyRecorder,
+                               ApplicationEventPublisher eventPublisher,
+                               ConfigurableListableBeanFactory beanFactory,
+                               io.github.biglv666.statekit.nested.SubMachineAggregator aggregator) {
         this.runtime = runtime;
         this.stateStore = stateStore;
         this.transactionTemplate = transactionTemplate;
@@ -78,59 +94,127 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
         this.historyRecorder = historyRecorder;
         this.eventPublisher = eventPublisher;
         this.beanFactory = beanFactory;
+        this.aggregator = aggregator;
     }
+
+    private final io.github.biglv666.statekit.nested.SubMachineAggregator aggregator;
 
     @Override
     public void fire(ID id, String event, FireArg... args) {
+        fire(id, event, FireOptions.DEFAULT, args);
+    }
+
+    @Override
+    public void fire(ID id, String event, FireOptions options, FireArg... args) {
         FireTokens tokens = splitArgs(event, args);
+        FireOptions opts = options == null ? FireOptions.DEFAULT : options;
         if (transactionTemplate != null) {
-            transactionTemplate.executeWithoutResult(status -> doFire(id, event, tokens));
+            transactionTemplate.executeWithoutResult(status -> doFire(id, event, tokens, opts));
         } else {
             // 容器无事务管理器时退化为逐语句自动提交（历史与 CAS 不再原子，见 README 说明）
-            doFire(id, event, tokens);
+            doFire(id, event, tokens, opts);
         }
     }
 
-    private void doFire(ID id, String event, FireTokens tokens) {
-        String machine = runtime.name();
-
-        // 1. 读当前态
-        String fromName = stateStore.readState(id)
-                .orElseThrow(() -> new IllegalTransitionException(machine, null, event, Set.of()));
-        S from = runtime.stateOf(fromName);
-
-        // 2. 路由查边
-        TransitionSpec spec = runtime.getRouter().route(fromName, event)
-                .orElseThrow(() -> new IllegalTransitionException(
-                        machine, fromName, event, runtime.getRouter().allowedEvents(fromName)));
-        S to = runtime.stateOf(spec.getTo());
-
-        StateTx<S, ID> tx = new TxContext(id, event, from, to, tokens.params);
-
-        // 3. 守卫（CAS 之前，只读校验；通过后到 CAS 之间的间隙由 WHERE status=from 兜底）
-        if (spec.getGuard() != null) {
-            StateGuard<S, ID> guard = resolveGuard(spec.getGuard());
-            if (!guard.test(tx)) {
-                throw new GuardRejectedException(machine, fromName, event);
-            }
+    @Override
+    public boolean tryFire(ID id, String event, FireArg... args) {
+        try {
+            fire(id, event, args);
+            return true;
+        } catch (StateConflictException e) {
+            // CAS 冲突（含重试耗尽）：确定性错误（非法流转/守卫拒绝）仍向上抛
+            return false;
         }
+    }
 
-        // 4. CAS：UPDATE ... SET status=to[, set列] WHERE id=? AND status=from
-        int affected = stateStore.casTransition(id, fromName, spec.getTo(), tokens.sets);
-        if (affected == 0) {
+    private void doFire(ID id, String event, FireTokens tokens, FireOptions options) {
+        String machine = runtime.name();
+        RetryPolicy retry = runtime.getDefinition().getRetry();
+        int attempts = retry == null ? 1 : retry.totalAttempts();
+
+        for (int attempt = 1; ; attempt++) {
+            // 1. 读当前态（version-column 启用时连版本一起读，乐观锁双保险）
+            boolean withVersion = runtime.getDefinition().getVersionColumn() != null;
+            StateAndVersion current = withVersion
+                    ? stateStore.readStateWithVersion(id)
+                    : stateStore.readState(id).map(StateAndVersion::of).orElse(null);
+            if (current == null || current.state() == null) {
+                throw new IllegalTransitionException(machine, null, event, Set.of());
+            }
+            String fromName = current.state();
+            S from = runtime.stateOf(fromName);
+
+            // 2. 路由查边（重试时以重读的最新状态重新解析，可能命中新的出边）
+            TransitionSpec spec = runtime.getRouter().route(fromName, event)
+                    .orElseThrow(() -> new IllegalTransitionException(
+                            machine, fromName, event, runtime.getRouter().allowedEvents(fromName)));
+            S to = runtime.stateOf(spec.getTo());
+
+            StateTx<S, ID> tx = new TxContext(id, event, from, to, tokens.params);
+
+            // 3. 守卫（CAS 之前，只读校验；通过后到 CAS 之间的间隙由 WHERE status=from 兜底）
+            if (spec.getGuard() != null) {
+                StateGuard<S, ID> guard = resolveGuard(spec.getGuard());
+                if (!guard.test(tx)) {
+                    throw new GuardRejectedException(machine, fromName, event);
+                }
+            }
+
+            // 4. CAS：UPDATE ... SET status=to[, set列][, version+1] WHERE id=? AND status=from[ AND version=?]
+            //    CAS 期间置 FireContext 标记，BYPASS 检测器据此豁免本条语句
+            int affected;
+            io.github.biglv666.statekit.bypass.FireContext.enter();
+            try {
+                affected = withVersion
+                        ? stateStore.casTransition(id, fromName, spec.getTo(), tokens.sets, current.version())
+                        : stateStore.casTransition(id, fromName, spec.getTo(), tokens.sets);
+            } finally {
+                io.github.biglv666.statekit.bypass.FireContext.exit();
+            }
+
+            if (affected > 0) {
+                complete(id, event, tokens, options, fromName, spec, tx);
+                return;
+            }
+
+            // CAS 未命中：log 策略静默；有重试额度则退避后以最新状态重试；否则抛冲突
             String actual = stateStore.readState(id).orElse(null);
             if (runtime.getDefinition().getConflictStrategy() == ConflictStrategy.LOG) {
                 log.warn("状态机 [{}] 实体 [{}] 事件 [{}] CAS 未命中: 期望 [{}], 实际 [{}]（conflict-strategy=log, 不抛异常）",
                         machine, id, event, fromName, actual);
                 return;
             }
+            if (attempt < attempts) {
+                log.info("状态机 [{}] 实体 [{}] 事件 [{}] 第 {} 次尝试未命中（期望 [{}], 实际 [{}]），{}ms 后重试",
+                        machine, id, event, attempt, fromName, actual, retry.backoffMs());
+                if (retry.backoffMs() > 0) {
+                    try {
+                        Thread.sleep(retry.backoffMs());
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new StateConflictException(machine, id, fromName, actual);
+                    }
+                }
+                continue;
+            }
             throw new StateConflictException(machine, id, fromName, actual);
         }
+    }
+
+    /** CAS 成功后的公共收尾：动作 → 嵌套聚合回发 → 事件 → 历史 */
+    private void complete(ID id, String event, FireTokens tokens, FireOptions options,
+                          String fromName, TransitionSpec spec, StateTx<S, ID> tx) {
+        String machine = runtime.name();
 
         // 5. 动作：与 CAS 同事务，行锁已持有；抛异常整体回滚（含 set 列）
         if (spec.getAction() != null) {
             StateAction<S, ID> action = resolveAction(spec.getAction());
             action.execute(tx);
+        }
+
+        // 5.5 嵌套聚合：子机器流转到终态后，按策略聚合并回发父事件（同事务）
+        if (aggregator != null && runtime.getRouter().isFinal(spec.getTo())) {
+            aggregator.maybeComplete(id, spec.getTo());
         }
 
         // 6. 发事件（进程内旁路观测，见 StateTransitedEvent 的监听契约）
@@ -140,8 +224,8 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
         eventPublisher.publishEvent(
                 new StateTransitedEvent(machine, id, fromName, spec.getTo(), event, operatorId, traceId, now));
 
-        // 7. 历史（同事务；未开启时 historyRecorder 为 null，零开销）
-        if (historyRecorder != null) {
+        // 7. 历史（同事务；未开启时 historyRecorder 为 null，零开销；skipHistory 单次豁免）
+        if (historyRecorder != null && !options.isSkipHistory()) {
             historyRecorder.record(new HistoryRecord(machine, String.valueOf(id),
                     fromName, spec.getTo(), event, operatorId, traceId, now));
         }

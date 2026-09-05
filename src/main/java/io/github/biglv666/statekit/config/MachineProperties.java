@@ -34,6 +34,18 @@ public class MachineProperties {
     /** 流转规则列表 */
     private List<TransitionProperties> transitions = new ArrayList<>();
 
+    /** 乐观锁版本列（0.2.0+，可选；启用后 CAS 额外匹配并自增 version） */
+    private String versionColumn;
+
+    /** 冲突自动重试（0.2.0+，可选） */
+    private RetryProperties retry;
+
+    /** 嵌套子机器绑定（0.2.0+，可选） */
+    private SubProperties sub;
+
+    /** 是否同时注册 Reactive 状态机（0.2.0+，默认 false） */
+    private boolean reactive = false;
+
     public Class<? extends Enum<?>> getStateType() {
         return stateType;
     }
@@ -88,6 +100,134 @@ public class MachineProperties {
 
     public void setTransitions(List<TransitionProperties> transitions) {
         this.transitions = transitions;
+    }
+
+    public String getVersionColumn() {
+        return versionColumn;
+    }
+
+    public void setVersionColumn(String versionColumn) {
+        this.versionColumn = versionColumn;
+    }
+
+    public RetryProperties getRetry() {
+        return retry;
+    }
+
+    public void setRetry(RetryProperties retry) {
+        this.retry = retry;
+    }
+
+    public SubProperties getSub() {
+        return sub;
+    }
+
+    public void setSub(SubProperties sub) {
+        this.sub = sub;
+    }
+
+    public boolean isReactive() {
+        return reactive;
+    }
+
+    public void setReactive(boolean reactive) {
+        this.reactive = reactive;
+    }
+
+    /** 冲突自动重试声明（0.2.0+） */
+    public static class RetryProperties {
+
+        /** 总尝试次数（含首次，≥1），默认 1 = 不重试 */
+        private int maxAttempts = 1;
+
+        /** 每次重试前等待毫秒数，默认 0 */
+        private long backoffMs = 0;
+
+        public int getMaxAttempts() {
+            return maxAttempts;
+        }
+
+        public void setMaxAttempts(int maxAttempts) {
+            this.maxAttempts = maxAttempts;
+        }
+
+        public long getBackoffMs() {
+            return backoffMs;
+        }
+
+        public void setBackoffMs(long backoffMs) {
+            this.backoffMs = backoffMs;
+        }
+    }
+
+    /** 嵌套子机器绑定声明（0.2.0+） */
+    public static class SubProperties {
+
+        /** 父状态机名 */
+        private String parent;
+
+        /** 父机器上挂载子流程的状态名 */
+        private String parentState;
+
+        /** 子项表中指向父实体主键的列名 */
+        private String groupColumn;
+
+        /** 聚合策略：all（会签）/ any（或签）/ count（满 n 个） */
+        private String strategy = "all";
+
+        /** strategy=count 时的阈值 */
+        private int count = 0;
+
+        /** 聚合满足后对父实体自动触发的事件名 */
+        private String onCompleteEvent;
+
+        public String getParent() {
+            return parent;
+        }
+
+        public void setParent(String parent) {
+            this.parent = parent;
+        }
+
+        public String getParentState() {
+            return parentState;
+        }
+
+        public void setParentState(String parentState) {
+            this.parentState = parentState;
+        }
+
+        public String getGroupColumn() {
+            return groupColumn;
+        }
+
+        public void setGroupColumn(String groupColumn) {
+            this.groupColumn = groupColumn;
+        }
+
+        public String getStrategy() {
+            return strategy;
+        }
+
+        public void setStrategy(String strategy) {
+            this.strategy = strategy;
+        }
+
+        public int getCount() {
+            return count;
+        }
+
+        public void setCount(int count) {
+            this.count = count;
+        }
+
+        public String getOnCompleteEvent() {
+            return onCompleteEvent;
+        }
+
+        public void setOnCompleteEvent(String onCompleteEvent) {
+            this.onCompleteEvent = onCompleteEvent;
+        }
     }
 
     /** yml 中单条流转规则声明 */

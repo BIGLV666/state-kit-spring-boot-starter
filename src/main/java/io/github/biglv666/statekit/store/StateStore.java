@@ -35,4 +35,21 @@ public interface StateStore {
      * @return 影响行数：1 表示流转成功；0 表示状态与期望不符（并发冲突或实体不存在）
      */
     int casTransition(Object id, String from, String to, Map<String, Object> setColumns);
+
+    /**
+     * 读取状态与乐观锁版本（0.2.0+）。机器未启用 version-column 时 version 为 null。
+     * 默认实现退化为 {@link #readState(Object)}，自定义实现可按需覆写。
+     */
+    default StateAndVersion readStateWithVersion(Object id) {
+        return readState(id).map(StateAndVersion::of).orElse(null);
+    }
+
+    /**
+     * 带乐观锁版本的 CAS 流转（0.2.0+）：WHERE 条件额外要求 version 匹配，
+     * 并在 SET 子句中自增 version。version 为 null 时语义等同
+     * {@link #casTransition(Object, String, String, Map)}。默认实现忽略 version。
+     */
+    default int casTransition(Object id, String from, String to, Map<String, Object> setColumns, Object version) {
+        return casTransition(id, from, to, setColumns);
+    }
 }

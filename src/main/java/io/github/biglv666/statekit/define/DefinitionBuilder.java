@@ -45,6 +45,10 @@ public final class DefinitionBuilder<S extends Enum<S>> {
     private String idColumn = "id";
     private ConflictStrategy conflictStrategy = ConflictStrategy.THROW;
     private final List<TransitionSpec> transitions = new ArrayList<>();
+    private String versionColumn;
+    private RetryPolicy retry;
+    private SubMachineBinding subBinding;
+    private boolean reactive;
 
     public DefinitionBuilder(String name, Class<S> stateType) {
         this.name = name;
@@ -104,6 +108,46 @@ public final class DefinitionBuilder<S extends Enum<S>> {
     }
 
     /**
+     * 启用乐观锁双保险（0.2.0+）：CAS 的 WHERE 额外匹配 version 并在 SET 中自增。
+     *
+     * @param column 业务表版本列名（BIGINT/INT）
+     */
+    public DefinitionBuilder<S> versionColumn(String column) {
+        this.versionColumn = column;
+        return this;
+    }
+
+    /**
+     * 冲突自动重试（0.2.0+）：CAS 未命中后事务内重读状态、重解析路由、重跑守卫再 CAS。
+     *
+     * @param maxAttempts 总尝试次数（含首次，≥1）
+     * @param backoffMs   每次重试前等待毫秒数
+     */
+    public DefinitionBuilder<S> retry(int maxAttempts, long backoffMs) {
+        this.retry = new RetryPolicy(maxAttempts, backoffMs);
+        return this;
+    }
+
+    /**
+     * 嵌套子机器绑定（0.2.0+）：本机器是父机器某状态下挂的子流程，
+     * 子项到终态后按策略聚合并自动对父实体 fire 指定事件（见 {@link SubMachineBinding}）。
+     */
+    public DefinitionBuilder<S> subMachineOf(String parent, S parentState, String groupColumn,
+                                             SubMachineBinding.Strategy strategy, int count, String onCompleteEvent) {
+        this.subBinding = new SubMachineBinding(parent, parentState.name(), groupColumn, strategy, count, onCompleteEvent);
+        return this;
+    }
+
+    /**
+     * 同时注册 Reactive 状态机（0.2.0+）：额外生成 bean 名为 {@code <machine名>Reactive}
+     * 的 {@code ReactiveStateMachine}（需要容器提供 ReactiveStateStore 或 DatabaseClient）。
+     */
+    public DefinitionBuilder<S> reactive() {
+        this.reactive = true;
+        return this;
+    }
+
+    /**
      * 为最近一次声明的 transition 挂载动作 bean。
      *
      * @param beanName 动作 bean 名，类型须为 {@code StateAction<S, ID>}
@@ -153,6 +197,6 @@ public final class DefinitionBuilder<S extends Enum<S>> {
             }
         }
         return new MachineDefinition(name, stateType, idType, table, statusColumn, idColumn,
-                conflictStrategy, transitions);
+                conflictStrategy, transitions, versionColumn, retry, subBinding, reactive);
     }
 }

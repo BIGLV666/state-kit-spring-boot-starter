@@ -13,7 +13,7 @@
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>state-kit-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <packaging>jar</packaging>
 
     <name>state-kit-spring-boot-starter</name>
@@ -68,6 +68,19 @@
             <artifactId>slf4j-api</artifactId>
             <scope>provided</scope>
         </dependency>
+        <!-- Reactive 通道（0.2.0+）：R2DBC 支持，optional——仅声明 reactive=true 的用户需要自带 -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-r2dbc</artifactId>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-core</artifactId>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
 
         <!--
             四件套适配（全部 optional，类路径检测，缺任何一个都不影响核心功能）：
@@ -101,6 +114,17 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Reactive 通道测试（0.2.0+）：R2DBC H2 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-r2dbc</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.r2dbc</groupId>
+            <artifactId>r2dbc-h2</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

@@ -3,6 +3,8 @@ package io.github.biglv666.statekit.bootstrap;
 import io.github.biglv666.statekit.ConflictStrategy;
 import io.github.biglv666.statekit.config.MachineProperties;
 import io.github.biglv666.statekit.define.MachineDefinition;
+import io.github.biglv666.statekit.define.RetryPolicy;
+import io.github.biglv666.statekit.define.SubMachineBinding;
 import io.github.biglv666.statekit.define.TransitionSpec;
 
 import java.util.LinkedHashSet;
@@ -37,13 +39,38 @@ final class MachineDefinitionConverter {
             throw new IllegalStateException("状态机 [%s] 的 conflict-strategy 非法: [%s]，只支持 throw / log"
                     .formatted(name, properties.getConflictStrategy()), e);
         }
+
         List<TransitionSpec> transitions = properties.getTransitions().stream()
                 .map(t -> new TransitionSpec(new LinkedHashSet<>(t.getFrom()), t.getEvent(), t.getTo(),
                         t.getAction(), t.getGuard()))
                 .toList();
+
+        RetryPolicy retry = null;
+        if (properties.getRetry() != null) {
+            retry = new RetryPolicy(properties.getRetry().getMaxAttempts(), properties.getRetry().getBackoffMs());
+        }
+
+        SubMachineBinding subBinding = null;
+        if (properties.getSub() != null) {
+            subBinding = convertSub(name, properties.getSub());
+        }
+
         return new MachineDefinition(name, properties.getStateType(),
                 properties.getIdType() == null ? Long.class : properties.getIdType(),
                 properties.getTable(), properties.getStatusColumn(), properties.getIdColumn(),
-                strategy, transitions);
+                strategy, transitions,
+                properties.getVersionColumn(), retry, subBinding, properties.isReactive());
+    }
+
+    private static SubMachineBinding convertSub(String name, MachineProperties.SubProperties sub) {
+        SubMachineBinding.Strategy strategy;
+        try {
+            strategy = SubMachineBinding.Strategy.valueOf(sub.getStrategy().toUpperCase().trim());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("状态机 [%s] 的 sub.strategy 非法: [%s]，只支持 all / any / count"
+                    .formatted(name, sub.getStrategy()), e);
+        }
+        return new SubMachineBinding(sub.getParent(), sub.getParentState(), sub.getGroupColumn(),
+                strategy, sub.getCount(), sub.getOnCompleteEvent());
     }
 }

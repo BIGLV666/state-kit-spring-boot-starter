@@ -61,6 +61,17 @@ public final class MachineRuntime<S extends Enum<S>> {
         return definition.getName();
     }
 
+    /** 终态名集合（没有任何出边的状态），供嵌套聚合判定使用 */
+    public java.util.Set<String> finalStates() {
+        java.util.Set<String> result = new java.util.LinkedHashSet<>();
+        for (String stateName : statesByName.keySet()) {
+            if (router.isFinal(stateName)) {
+                result.add(stateName);
+            }
+        }
+        return result;
+    }
+
     /** 钩子 bean 缓存读写（框架内部使用） */
     public Map<String, Object> hookCache() {
         return hookCache;

@@ -1,8 +1,13 @@
 spring:
   autoconfigure:
     # auth-kit 自动装配需要 Redis（session 存储），测试环境无 Redis，排除之；
-    # state-kit 只读取 AuthContext 静态上下文，不依赖 auth-kit 的任何 Bean
-    exclude: io.github.biglv666.authkit.config.AuthKitAutoConfiguration
+    # state-kit 只读取 AuthContext 静态上下文，不依赖 auth-kit 的任何 Bean。
+    # R2dbcAutoConfiguration 会让 DataSourceAutoConfiguration 退避（ConnectionFactory 存在），
+    # 测试型 JVM 的 classpath 有 r2dbc-h2，同样排除；Reactive 用例走独立 runner 显式装配
+    exclude: io.github.biglv666.authkit.config.AuthKitAutoConfiguration,
+             org.springframework.boot.autoconfigure.r2dbc.R2dbcAutoConfiguration,
+             org.springframework.boot.autoconfigure.data.r2dbc.R2dbcDataAutoConfiguration,
+             org.springframework.boot.autoconfigure.r2dbc.R2dbcTransactionManagerAutoConfiguration
   datasource:
     url: jdbc:h2:mem:statekit;DB_CLOSE_DELAY=-1
     username: sa
@@ -45,3 +50,39 @@ state-kit:
       transitions:
         - { from: A, event: GO, to: B }
         - { from: C, event: GO, to: D }
+    # 0.2.0：乐观锁双保险
+    orderv:
+      state-type: io.github.biglv666.statekit.testapp.OrderStatus
+      table: t_orderv
+      version-column: version
+      transitions:
+        - { from: CREATED, event: PAY, to: PAID }
+    # 0.2.0：冲突自动重试（GO 从 A→B、B→D，重试以最新状态重解析路由）
+    retryFlow:
+      state-type: io.github.biglv666.statekit.testapp.FlowStatus
+      table: t_retry
+      conflict-strategy: throw
+      retry:
+        max-attempts: 3
+        backoff-ms: 200
+      transitions:
+        - { from: A, event: GO, to: B }
+        - { from: B, event: GO, to: D }
+    # 0.2.0：嵌套子状态机（会签 ALL）
+    wf:
+      state-type: io.github.biglv666.statekit.testapp.WorkflowStatus
+      table: t_wf
+      transitions:
+        - { from: NEW, event: START, to: REVIEWING }
+        - { from: REVIEWING, event: ALL_OK, to: APPROVED }
+    wfItem:
+      state-type: io.github.biglv666.statekit.testapp.ItemStatus
+      table: t_wf_item
+      sub:
+        parent: wf
+        parent-state: REVIEWING
+        group-column: workflow_id
+        strategy: all
+        on-complete-event: ALL_OK
+      transitions:
+        - { from: PENDING, event: OK, to: DONE }

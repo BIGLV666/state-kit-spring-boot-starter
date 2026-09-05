@@ -17,7 +17,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 历史模块关闭（默认）：启动零 DDL、容器内不存在任何历史相关 Bean。
  */
-@SpringBootTest(classes = TestApplication.class)
+@SpringBootTest(classes = TestApplication.class,
+        properties = "spring.datasource.url=jdbc:h2:mem:hist_disabled;DB_CLOSE_DELAY=-1")
 class HistoryDisabledTest {
 
     @Autowired
