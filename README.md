@@ -1,5 +1,7 @@
 # state-kit-spring-boot-starter
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.biglv666/state-kit-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.biglv666/state-kit-spring-boot-starter) [![CI](https://github.com/BIGLV666/state-kit-spring-boot-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/BIGLV666/state-kit-spring-boot-starter/actions/workflows/ci.yml)
+
 轻量级**声明式状态流转** Spring Boot Starter：业务只在 yml（或 Java DSL）里声明流转规则，框架启动时动态生成状态机 Bean；以数据库 **CAS 条件更新**保证并发正确，以**唯一写入口**保证状态不被绕改。**核心零建表、零业务流程类、零必选依赖。**
 
 > **0.2.0 新增**：冲突自动重试、乐观锁双保险（version 列）、`skipHistory`/`tryFire` 重载、状态停留时长统计、BYPASS 绕改检测、嵌套子状态机（会签/或签/满 n 放行）、Reactive/WebFlux 通道（R2DBC）。见第九节。
@@ -31,7 +33,7 @@ business ──fire(id, event, args)──▶ StateMachine（框架生成的 Bea
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>state-kit-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
