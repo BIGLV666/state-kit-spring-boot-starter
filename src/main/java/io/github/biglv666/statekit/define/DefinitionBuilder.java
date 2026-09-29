@@ -49,6 +49,7 @@ public final class DefinitionBuilder<S extends Enum<S>> {
     private RetryPolicy retry;
     private SubMachineBinding subBinding;
     private boolean reactive;
+    private String compensation;
 
     public DefinitionBuilder(String name, Class<S> stateType) {
         this.name = name;
@@ -148,6 +149,27 @@ public final class DefinitionBuilder<S extends Enum<S>> {
     }
 
     /**
+     * 冲突补偿策略（0.3.0+）：fire 的 CAS 冲突（含重试耗尽）后调用指定策略 bean，
+     * 决定重路由新事件 / 放弃 / 延迟调度。
+     *
+     * @param beanName 策略 bean 名，类型须为 {@code CompensationPolicy}
+     */
+    public DefinitionBuilder<S> compensation(String beanName) {
+        this.compensation = beanName;
+        return this;
+    }
+
+    /**
+     * 为最近一次声明的 transition 补描述与期望 param（0.3.0+），
+     * 供 availableActions 与导出用。
+     */
+    public DefinitionBuilder<S> describe(String description, String... params) {
+        return editLast("describe", spec -> new TransitionSpec(spec.getFrom(), spec.getEvent(),
+                spec.getTo(), spec.getAction(), spec.getGuard(), description,
+                java.util.Set.of(params)));
+    }
+
+    /**
      * 为最近一次声明的 transition 挂载动作 bean。
      *
      * @param beanName 动作 bean 名，类型须为 {@code StateAction<S, ID>}
@@ -197,6 +219,6 @@ public final class DefinitionBuilder<S extends Enum<S>> {
             }
         }
         return new MachineDefinition(name, stateType, idType, table, statusColumn, idColumn,
-                conflictStrategy, transitions, versionColumn, retry, subBinding, reactive);
+                conflictStrategy, transitions, versionColumn, retry, subBinding, reactive, compensation);
     }
 }

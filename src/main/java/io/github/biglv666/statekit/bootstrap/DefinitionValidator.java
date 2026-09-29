@@ -103,6 +103,21 @@ final class DefinitionValidator {
         validateSubBinding(definition, all);
         validateParentChain(definition, all, new HashSet<>());
 
+        // 0.3.0：补偿策略 bean 存在性与类型
+        if (definition.getCompensation() != null && !definition.getCompensation().isBlank()) {
+            String comp = definition.getCompensation();
+            if (!beanFactory.containsBean(comp)) {
+                throw new IllegalStateException("状态机 [%s] 引用的 compensation bean [%s] 不存在"
+                        .formatted(definition.getName(), comp));
+            }
+            Class<?> type = beanFactory.getType(comp);
+            if (type != null
+                    && !io.github.biglv666.statekit.compensation.CompensationPolicy.class.isAssignableFrom(type)) {
+                throw new IllegalStateException("状态机 [%s] 引用的 compensation bean [%s] 类型 %s 不是 CompensationPolicy"
+                        .formatted(definition.getName(), comp, type.getName()));
+            }
+        }
+
         // 可达性告警（非错误）：无任何入边的状态，若同时有出边，通常是预期起点；孤立状态提示可能漏声明
         Set<String> reachable = new HashSet<>();
         for (TransitionSpec spec : definition.getTransitions()) {

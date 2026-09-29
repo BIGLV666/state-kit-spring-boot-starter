@@ -142,7 +142,27 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
                         definition.getName(), definition.getStateType().getSimpleName(),
                         definition.getIdType().getSimpleName());
             }
+            // 0.3.0：可视化导出器 bean（<machine名>Exporter）
+            registerExporterBean(registry, runtime, definition);
         }
+    }
+
+    /** 注册可视化导出器 bean（<machine名>Exporter），REST 端点按名消费 */
+    @SuppressWarnings("rawtypes")
+    private void registerExporterBean(BeanDefinitionRegistry registry, MachineRuntime runtime,
+                                      MachineDefinition definition) {
+        String beanName = definition.getName() + "Exporter";
+        if (registry.containsBeanDefinition(beanName)) {
+            return;
+        }
+        RootBeanDefinition beanDefinition = new RootBeanDefinition();
+        beanDefinition.setTargetType(ResolvableType.forClass(
+                io.github.biglv666.statekit.export.StateMachineExporter.class));
+        beanDefinition.setBeanClassName(io.github.biglv666.statekit.export.StateMachineExporter.class.getName());
+        beanDefinition.setRole(BeanDefinition.ROLE_APPLICATION);
+        beanDefinition.setInstanceSupplier(
+                () -> new io.github.biglv666.statekit.export.StateMachineExporter(runtime));
+        registry.registerBeanDefinition(beanName, beanDefinition);
     }
 
     /** yml 绑定：用 Binder 直读 Environment，避免在启动早期实例化配置属性 Bean */

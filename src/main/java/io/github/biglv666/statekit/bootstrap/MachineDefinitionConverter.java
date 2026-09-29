@@ -42,7 +42,7 @@ final class MachineDefinitionConverter {
 
         List<TransitionSpec> transitions = properties.getTransitions().stream()
                 .map(t -> new TransitionSpec(new LinkedHashSet<>(t.getFrom()), t.getEvent(), t.getTo(),
-                        t.getAction(), t.getGuard()))
+                        t.getAction(), t.getGuard(), t.getDescription(), new LinkedHashSet<>(t.getParams())))
                 .toList();
 
         RetryPolicy retry = null;
@@ -59,7 +59,8 @@ final class MachineDefinitionConverter {
                 properties.getIdType() == null ? Long.class : properties.getIdType(),
                 properties.getTable(), properties.getStatusColumn(), properties.getIdColumn(),
                 strategy, transitions,
-                properties.getVersionColumn(), retry, subBinding, properties.isReactive());
+                properties.getVersionColumn(), retry, subBinding, properties.isReactive(),
+                properties.getCompensation());
     }
 
     private static SubMachineBinding convertSub(String name, MachineProperties.SubProperties sub) {

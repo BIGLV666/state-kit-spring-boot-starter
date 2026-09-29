@@ -46,6 +46,9 @@ public class MachineProperties {
     /** 是否同时注册 Reactive 状态机（0.2.0+，默认 false） */
     private boolean reactive = false;
 
+    /** 冲突补偿策略 bean 名（0.3.0+，可选） */
+    private String compensation;
+
     public Class<? extends Enum<?>> getStateType() {
         return stateType;
     }
@@ -132,6 +135,14 @@ public class MachineProperties {
 
     public void setReactive(boolean reactive) {
         this.reactive = reactive;
+    }
+
+    public String getCompensation() {
+        return compensation;
+    }
+
+    public void setCompensation(String compensation) {
+        this.compensation = compensation;
     }
 
     /** 冲突自动重试声明（0.2.0+） */
@@ -252,6 +263,12 @@ public class MachineProperties {
         /** 守卫 bean 名（可选） */
         private String guard;
 
+        /** 事件描述（0.3.0+，供 availableActions 与导出，可选） */
+        private String description;
+
+        /** 期望的 param 键名列表（0.3.0+，供前端表单提示，可选） */
+        private java.util.List<String> params = new ArrayList<>();
+
         public List<String> getFrom() {
             return from;
         }
@@ -290,6 +307,22 @@ public class MachineProperties {
 
         public void setGuard(String guard) {
             this.guard = guard;
+        }
+
+        public String getDescription() {
+            return description;
+        }
+
+        public void setDescription(String description) {
+            this.description = description;
+        }
+
+        public java.util.List<String> getParams() {
+            return params;
+        }
+
+        public void setParams(java.util.List<String> params) {
+            this.params = params;
         }
     }
 }

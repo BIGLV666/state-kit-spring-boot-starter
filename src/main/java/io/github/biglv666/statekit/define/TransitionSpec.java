@@ -13,13 +13,25 @@ public final class TransitionSpec {
     private final String to;
     private final String action;
     private final String guard;
+    /** 事件描述（0.3.0+，供 availableActions 与导出用，可选） */
+    private final String description;
+    /** 期望的 param 键名（0.3.0+，供前端提示必填上下文，可选） */
+    private final Set<String> params;
 
     public TransitionSpec(Set<String> from, String event, String to, String action, String guard) {
+        this(from, event, to, action, guard, null, Set.of());
+    }
+
+    /** 0.3.0+ 全参构造 */
+    public TransitionSpec(Set<String> from, String event, String to, String action, String guard,
+                          String description, Set<String> params) {
         this.from = Set.copyOf(from);
         this.event = event;
         this.to = to;
         this.action = action;
         this.guard = guard;
+        this.description = description;
+        this.params = params == null ? Set.of() : Set.copyOf(params);
     }
 
     /** 源状态名集合（多源简写时多于一个） */
@@ -45,6 +57,16 @@ public final class TransitionSpec {
     /** 守卫 bean 名，未挂载为 null */
     public String getGuard() {
         return guard;
+    }
+
+    /** 事件描述，未声明为 null（0.3.0+） */
+    public String getDescription() {
+        return description;
+    }
+
+    /** 期望的 param 键名集合（0.3.0+） */
+    public Set<String> getParams() {
+        return params;
     }
 
     /** 供启动期校验错误信息定位使用，如 {@code [CREATED|PAID] --CANCEL--> CANCELLED} */

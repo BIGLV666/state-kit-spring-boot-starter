@@ -68,6 +68,23 @@ public class TestHooksConfig {
         };
     }
 
+    /** 0.3.0 补偿策略（compFlow 机器）：决策存于 ModeHolder 供各用例切换 */
+    @Bean
+    public io.github.biglv666.statekit.compensation.CompensationPolicy compFlowPolicy() {
+        return ctx -> switch (CompModeHolder.mode) {
+            case RETRY -> io.github.biglv666.statekit.compensation.CompensationDecision.retryWith("GO");
+            case SCHEDULE -> io.github.biglv666.statekit.compensation.CompensationDecision.schedule("GO", 30_000);
+            case ABORT -> io.github.biglv666.statekit.compensation.CompensationDecision.abort();
+        };
+    }
+
+    /** 补偿策略的用例切换开关 */
+    public static final class CompModeHolder {
+        public enum Mode { RETRY, SCHEDULE, ABORT }
+
+        public static volatile Mode mode = Mode.ABORT;
+    }
+
     /** 记录最近一次动作收到的 tx 快照（测试断言用） */
     public static final class LastTx {
         public static final List<String> seen = new ArrayList<>();

@@ -122,4 +122,15 @@ public interface StateMachine<S, ID> {
      * @throws io.github.biglv666.statekit.exception.EntityNotFoundException 实体不存在
      */
     Set<S> nextStates(ID id);
+
+    /**
+     * 可操作视图（0.3.0+）：当前状态下可触发的事件结构化描述，
+     * 供前端直接渲染操作按钮面板（event 名 + 描述 + 是否带守卫 + 期望的 param）。
+     * 未经过守卫校验，仍可能 fire 失败。
+     *
+     * @param id 实体主键
+     * @return 操作描述列表，无出边时为空列表
+     * @throws io.github.biglv666.statekit.exception.EntityNotFoundException 实体不存在
+     */
+    java.util.List<ActionDescriptor> availableActions(ID id);
 }

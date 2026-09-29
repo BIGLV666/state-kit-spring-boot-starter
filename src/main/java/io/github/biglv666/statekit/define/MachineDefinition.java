@@ -26,20 +26,32 @@ public final class MachineDefinition {
     private final SubMachineBinding subBinding;
     /** 是否同时注册 Reactive 状态机（0.2.0+） */
     private final boolean reactive;
+    /** 冲突补偿策略 bean 名，未声明为 null（0.3.0+） */
+    private final String compensation;
 
     public MachineDefinition(String name, Class<? extends Enum<?>> stateType, Class<?> idType,
                              String table, String statusColumn, String idColumn,
                              ConflictStrategy conflictStrategy, List<TransitionSpec> transitions) {
         this(name, stateType, idType, table, statusColumn, idColumn,
-                conflictStrategy, transitions, null, null, null, false);
+                conflictStrategy, transitions, null, null, null, false, null);
     }
 
-    /** 0.2.0+ 全参构造 */
+    /** 0.2.0 全参构造 */
     public MachineDefinition(String name, Class<? extends Enum<?>> stateType, Class<?> idType,
                              String table, String statusColumn, String idColumn,
                              ConflictStrategy conflictStrategy, List<TransitionSpec> transitions,
                              String versionColumn, RetryPolicy retry,
                              SubMachineBinding subBinding, boolean reactive) {
+        this(name, stateType, idType, table, statusColumn, idColumn,
+                conflictStrategy, transitions, versionColumn, retry, subBinding, reactive, null);
+    }
+
+    /** 0.3.0 全参构造 */
+    public MachineDefinition(String name, Class<? extends Enum<?>> stateType, Class<?> idType,
+                             String table, String statusColumn, String idColumn,
+                             ConflictStrategy conflictStrategy, List<TransitionSpec> transitions,
+                             String versionColumn, RetryPolicy retry,
+                             SubMachineBinding subBinding, boolean reactive, String compensation) {
         this.name = name;
         this.stateType = stateType;
         this.idType = idType;
@@ -52,6 +64,7 @@ public final class MachineDefinition {
         this.retry = retry;
         this.subBinding = subBinding;
         this.reactive = reactive;
+        this.compensation = compensation;
     }
 
     /** 状态机名，即 Bean 名，全局唯一 */
@@ -112,5 +125,10 @@ public final class MachineDefinition {
     /** 是否同时注册 Reactive 状态机（0.2.0+） */
     public boolean isReactive() {
         return reactive;
+    }
+
+    /** 冲突补偿策略 bean 名，未声明为 null（0.3.0+） */
+    public String getCompensation() {
+        return compensation;
     }
 }

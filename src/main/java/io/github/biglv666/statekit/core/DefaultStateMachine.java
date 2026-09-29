@@ -57,6 +57,9 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
 
     private static final Logger log = LoggerFactory.getLogger(DefaultStateMachine.class);
 
+    /** 补偿重路由深度（0.3.0+）：retryWith 递归 fire 时递增，框架硬上限 3 层防失控 */
+    private static final ThreadLocal<Integer> COMPENSATION_DEPTH = ThreadLocal.withInitial(() -> 0);
+
     private final MachineRuntime<S> runtime;
     private final StateStore stateStore;
     private final TransactionTemplate transactionTemplate;
@@ -132,9 +135,10 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
         RetryPolicy retry = runtime.getDefinition().getRetry();
         int attempts = retry == null ? 1 : retry.totalAttempts();
 
+        boolean withVersion = runtime.getDefinition().getVersionColumn() != null;
+        int compensationDepth = COMPENSATION_DEPTH.get() == null ? 0 : COMPENSATION_DEPTH.get();
         for (int attempt = 1; ; attempt++) {
             // 1. 读当前态（version-column 启用时连版本一起读，乐观锁双保险）
-            boolean withVersion = runtime.getDefinition().getVersionColumn() != null;
             StateAndVersion current = withVersion
                     ? stateStore.readStateWithVersion(id)
                     : stateStore.readState(id).map(StateAndVersion::of).orElse(null);
@@ -177,7 +181,8 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
                 return;
             }
 
-            // CAS 未命中：log 策略静默；有重试额度则退避后以最新状态重试；否则抛冲突
+            // CAS 未命中：log 策略静默；有重试额度则退避后以最新状态重试；
+            // 重试耗尽→调补偿策略（重路由新事件 / 放弃 / 延迟调度）；无策略按默认抛冲突
             String actual = stateStore.readState(id).orElse(null);
             if (runtime.getDefinition().getConflictStrategy() == ConflictStrategy.LOG) {
                 log.warn("状态机 [{}] 实体 [{}] 事件 [{}] CAS 未命中: 期望 [{}], 实际 [{}]（conflict-strategy=log, 不抛异常）",
@@ -197,8 +202,118 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
                 }
                 continue;
             }
+
+            // 补偿策略判定（0.3.0+）
+            if (compensationDepth < 3 && compensate(id, event, fromName, actual, options, compensationDepth)) {
+                return; // 调度补偿：fire 正常返回
+            }
+            if (compensationDepth >= 3) {
+                log.warn("状态机 [{}] 补偿重路由达到硬上限 3 次，按放弃处理", runtime.name());
+            }
             throw new StateConflictException(machine, id, fromName, actual);
         }
+    }
+
+    /**
+     * 补偿策略判定（0.3.0+）：机器声明了 compensation bean 且策略返回非 abort 时执行补偿。
+     * retryWith 以新事件重跑完整 fire 流程（再冲突时回调策略，框架限 3 次防失控）；
+     * schedule 发布调度事件并正常返回；abort / 无策略 / 策略异常返回 false → 调用方抛冲突。
+     *
+     * @return true 已按调度处理（fire 正常返回）；false 应继续抛 StateConflictException
+     */
+    private boolean compensate(ID id, String event, String fromName, String actual, FireOptions options,
+                               int depth) {
+        String beanName = runtime.getDefinition().getCompensation();
+        if (beanName == null) {
+            return false;
+        }
+        io.github.biglv666.statekit.compensation.CompensationPolicy policy = resolveCompensation(beanName);
+        if (policy == null) {
+            return false;
+        }
+        String machine = runtime.name();
+        java.util.Set<String> allowed = actual == null
+                ? java.util.Set.of() : runtime.getRouter().allowedEvents(actual);
+        io.github.biglv666.statekit.compensation.ConflictContext ctx =
+                new io.github.biglv666.statekit.compensation.ConflictContext(
+                        machine, id, event, fromName, actual, allowed);
+
+        io.github.biglv666.statekit.compensation.CompensationDecision decision;
+        try {
+            decision = policy.onConflict(ctx);
+        } catch (Exception e) {
+            log.warn("状态机 [{}] 补偿策略 [{}] 判定异常，按放弃处理", machine, beanName, e);
+            decision = io.github.biglv666.statekit.compensation.CompensationDecision.abort();
+        }
+        if (decision == null) {
+            decision = io.github.biglv666.statekit.compensation.CompensationDecision.abort();
+        }
+
+        recordCompensation(machine, id, event, fromName, actual, decision, options);
+
+        if (decision instanceof io.github.biglv666.statekit.compensation.CompensationDecision.RetryWith r) {
+            log.info("状态机 [{}] 实体 [{}] 冲突后按补偿策略以事件 [{}] 重试（第 {} 层）", machine, id, r.event(), depth + 1);
+            COMPENSATION_DEPTH.set(depth + 1);
+            try {
+                fire(id, r.event(), options);
+            } finally {
+                COMPENSATION_DEPTH.set(depth);
+            }
+            return true; // 补偿已推进（或其异常向上传播），外层不再抛冲突
+        }
+        if (decision instanceof io.github.biglv666.statekit.compensation.CompensationDecision.Schedule s) {
+            String operatorId = operatorResolver == null ? null : operatorResolver.resolve();
+            String traceId = traceIdResolver == null ? null : traceIdResolver.resolve();
+            eventPublisher.publishEvent(new io.github.biglv666.statekit.event.CompensationScheduledEvent(
+                    machine, id, s.event(), s.delayMs(), fromName, actual, LocalDateTime.now()));
+            return true; // 调度补偿：fire 正常返回，不抛异常
+        }
+        return false; // Abort
+    }
+
+    /** 补偿决策落历史表（event 以 COMPENSATE: 前缀，供人工干预查询），skipHistory 仍豁免 */
+    private void recordCompensation(String machine, ID id, String event, String fromName, String actual,
+                                    io.github.biglv666.statekit.compensation.CompensationDecision decision,
+                                    FireOptions options) {
+        if (historyRecorder == null || options.isSkipHistory()) {
+            return;
+        }
+        String operatorId = operatorResolver == null ? null : operatorResolver.resolve();
+        String traceId = traceIdResolver == null ? null : traceIdResolver.resolve();
+        String suffix;
+        if (decision instanceof io.github.biglv666.statekit.compensation.CompensationDecision.RetryWith r) {
+            suffix = "retry:" + r.event();
+        } else if (decision instanceof io.github.biglv666.statekit.compensation.CompensationDecision.Schedule s) {
+            suffix = "schedule:" + s.event() + ":" + s.delayMs() + "ms";
+        } else {
+            suffix = "abort";
+        }
+        HistoryRecord record = new HistoryRecord(machine, String.valueOf(id),
+                fromName, actual == null ? fromName : actual,
+                "COMPENSATE:" + suffix, operatorId, traceId, LocalDateTime.now());
+        // 补偿记录是审计性记录：ABORT/补偿失败时主事务回滚，记录必须保留，
+        // 故以 REQUIRES_NEW 独立事务写入，与主流转事务隔离
+        if (transactionTemplate != null) {
+            var newTx = new TransactionTemplate(transactionTemplate.getTransactionManager());
+            newTx.setPropagationBehavior(
+                    org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            newTx.executeWithoutResult(status -> historyRecorder.record(record));
+        } else {
+            historyRecorder.record(record);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private io.github.biglv666.statekit.compensation.CompensationPolicy resolveCompensation(String beanName) {
+        return (io.github.biglv666.statekit.compensation.CompensationPolicy)
+                runtime.hookCache().computeIfAbsent("C:" + beanName, k -> {
+                    Object bean = beanFactory.getBean(beanName);
+                    if (!(bean instanceof io.github.biglv666.statekit.compensation.CompensationPolicy)) {
+                        throw new IllegalStateException("状态机 [%s] 引用的 compensation bean [%s] 类型不是 CompensationPolicy"
+                                .formatted(runtime.name(), beanName));
+                    }
+                    return bean;
+                });
     }
 
     /** CAS 成功后的公共收尾：动作 → 嵌套聚合回发 → 事件 → 历史 */
@@ -250,6 +365,20 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
         Set<S> result = new LinkedHashSet<>();
         for (String name : runtime.getRouter().nextStates(fromName)) {
             result.add(runtime.stateOf(name));
+        }
+        return result;
+    }
+
+    @Override
+    public java.util.List<io.github.biglv666.statekit.ActionDescriptor> availableActions(ID id) {
+        String fromName = stateStore.readState(id)
+                .orElseThrow(() -> new EntityNotFoundException(runtime.name(), id));
+        java.util.List<io.github.biglv666.statekit.ActionDescriptor> result = new java.util.ArrayList<>();
+        for (String event : runtime.getRouter().allowedEvents(fromName)) {
+            var specOpt = runtime.getRouter().route(fromName, event);
+            specOpt.ifPresent(spec -> result.add(new io.github.biglv666.statekit.ActionDescriptor(
+                    event, spec.getTo(), spec.getDescription(),
+                    spec.getGuard() != null, spec.getParams())));
         }
         return result;
     }

@@ -209,4 +209,28 @@ public class StateKitAutoConfiguration {
             }
         }
     }
+
+    /**
+     * 可视化导出 REST 端点（0.3.0+）：仅当 spring-web 在类路径时注册。
+     * exporter 按 bean 名（machine名 + Exporter）反查机器名，业务方自行实现的
+     * 导出端点会被本方法 @ConditionalOnMissingBean 避让。
+     */
+    @Bean
+    @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
+    @ConditionalOnMissingBean(io.github.biglv666.statekit.export.StateKitDiagramController.class)
+    public io.github.biglv666.statekit.export.StateKitDiagramController stateKitDiagramController(
+            org.springframework.context.ApplicationContext applicationContext) {
+        java.util.Map<String, io.github.biglv666.statekit.export.StateMachineExporter> byMachine =
+                new java.util.LinkedHashMap<>();
+        for (String beanName : applicationContext
+                .getBeanNamesForType(io.github.biglv666.statekit.export.StateMachineExporter.class)) {
+            if (beanName.endsWith("Exporter")) {
+                String machine = beanName.substring(0, beanName.length() - "Exporter".length());
+                byMachine.put(machine,
+                        applicationContext.getBean(beanName,
+                                io.github.biglv666.statekit.export.StateMachineExporter.class));
+            }
+        }
+        return new io.github.biglv666.statekit.export.StateKitDiagramController(byMachine);
+    }
 }

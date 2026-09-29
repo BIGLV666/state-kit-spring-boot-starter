@@ -68,6 +68,16 @@ state-kit:
       transitions:
         - { from: A, event: GO, to: B }
         - { from: B, event: GO, to: D }
+    # 0.3.0：补偿策略（GO: A→B、B→D，并发推进后按策略决策去向）
+    compFlow:
+      state-type: io.github.biglv666.statekit.testapp.FlowStatus
+      table: t_comp
+      conflict-strategy: throw
+      compensation: compFlowPolicy
+      transitions:
+        - { from: A, event: GO, to: B }
+        - { from: B, event: GO, to: D }
+        - { from: A, event: FAST, to: C }
     # 0.2.0：嵌套子状态机（会签 ALL）
     wf:
       state-type: io.github.biglv666.statekit.testapp.WorkflowStatus

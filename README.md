@@ -4,7 +4,7 @@
 
 轻量级**声明式状态流转** Spring Boot Starter：业务只在 yml（或 Java DSL）里声明流转规则，框架启动时动态生成状态机 Bean；以数据库 **CAS 条件更新**保证并发正确，以**唯一写入口**保证状态不被绕改。**核心零建表、零业务流程类、零必选依赖。**
 
-> **0.2.0 新增**：冲突自动重试、乐观锁双保险（version 列）、`skipHistory`/`tryFire` 重载、状态停留时长统计、BYPASS 绕改检测、嵌套子状态机（会签/或签/满 n 放行）、Reactive/WebFlux 通道（R2DBC）。见第九节。
+> **0.3.0 新增**：Mermaid/DOT 状态图导出与 REST 端点、`availableActions()` 可操作视图（event 描述/守卫/期望 param）、冲突补偿策略 SPI（重路由新事件/放弃/延迟调度，决策落历史表）。**0.2.0 新增**：冲突自动重试、乐观锁双保险、`skipHistory`/`tryFire` 重载、状态停留时长统计、BYPASS 绕改检测、嵌套子状态机（会签/或签/满 n 放行）、Reactive/WebFlux 通道（R2DBC）。见第九、十二节。
 
 ```
 business ──fire(id, event, args)──▶ StateMachine（框架生成的 Bean）
@@ -311,7 +311,7 @@ public StateStore redisStateStore() {
 
 ## 十一、测试
 
-`src/test` 覆盖 80 个用例（H2 内存库，`mvnw test` 一键运行），包括：
+`src/test` 覆盖 90 个用例（H2 内存库，`mvnw test` 一键运行），包括：
 
 - **并发双流转**（8 线程同 fire，CAS 保证恰好一成一败）；
 - **竞态窗口精确复现**（未提交事务持锁 + 另一线程 fire，CAS 阻塞后 WHERE 重评）；
@@ -422,11 +422,75 @@ StateMachine.define("reactiveOrder", ReactiveTestStatus.class)
 
 需要使用方自带 `spring-boot-starter-data-r2dbc` + 驱动（如 r2dbc-h2）。限制：嵌套聚合与 BYPASS 检测不适用于本通道；operatorId 依赖 ThreadLocal 的 auth-kit 在纯 WebFlux 下为 null。
 
+## 十三、0.3.0 新特性详解
+
+### 1. 状态机可视化导出
+
+每台机器装配一个 `<machine名>Exporter` Bean，把声明渲染为 Mermaid / DOT 文本：
+
+```java
+@Autowired StateMachineExporter orderExporter;
+
+orderExporter.toMermaid();   // stateDiagram-v2，终态标 [*]，边上标注 action/guard
+orderExporter.toDot();       // Graphviz DOT，终态双圆
+orderExporter.all();         // 两种格式一次返回
+```
+
+spring-web 在类路径时自动注册 REST 端点（无鉴权，定位内部运维/文档工具消费）：
+
+```
+GET /statekit/machines/order/diagram?format=mermaid    # 默认 mermaid，可 dot
+GET /statekit/machines/order/diagram/all
+```
+
+### 2. 可操作视图 availableActions()
+
+`nextStates()` 的结构化升级版，前端按此直接渲染操作面板，不再硬编码状态判断：
+
+```java
+List<ActionDescriptor> actions = orderFlow.availableActions(orderId);
+// → [ActionDescriptor(event="PAY", to="PAID", description=null,
+//                     isGuarded=false, requiredParams=[]),
+//    ActionDescriptor(event="CANCEL", to="CANCELLED",
+//                     isGuarded=true, ...)]
+```
+
+描述与期望 param 在声明边时可选标注（yml 的 `description`/`params` 字段，或 DSL 的 `.describe("支付", "txnNo", "amount")`）。
+
+### 3. 冲突补偿策略 SPI
+
+fire 的 CAS 冲突（含自动重试耗尽）后调用机器声明的 `compensation` bean，决定去向：
+
+```java
+@Component("orderCompensation")
+public class OrderCompensation implements CompensationPolicy {
+    public CompensationDecision onConflict(ConflictContext ctx) {
+        // 已被并发推进到 PAID：直接补发 SHIP 而不是抛异常
+        if ("PAID".equals(ctx.actualState())) return CompensationDecision.retryWith("SHIP");
+        // 延迟补偿：fire 正常返回，发布 CompensationScheduledEvent 由业务方调度
+        if ("CREATED".equals(ctx.actualState())) return CompensationDecision.schedule("PAY", 30_000);
+        return CompensationDecision.abort();   // 抛 StateConflictException（等价默认）
+    }
+}
+```
+
+```yaml
+machines:
+  order:
+    compensation: orderCompensation
+```
+
+- `retryWith(event)`：以新事件重跑完整 fire（重试再冲突会回调策略，框架硬上限 3 层防失控）；
+- `schedule(event, delayMs)`：fire 正常返回 + 发布 `CompensationScheduledEvent`，业务方自行调度（定时任务/OutboxPro 等，框架不内置调度器）；
+- `abort()`：抛 StateConflictException，与无策略行为一致（向后兼容）；
+- 决策以 `COMPENSATE:retry:...`/`COMPENSATE:schedule:...`/`COMPENSATE:abort` 落历史表（审计痕迹），**ABORT 场景主事务回滚也保留**（补偿记录走 REQUIRES_NEW 独立事务），skipHistory 仍豁免。
+
 ## 十三、版本路线
 
 - **V1.5**（✅ 0.2.0 已交付）：状态停留时长统计、乐观锁双保险、冲突自动重试、skipHistory/tryFire 重载
 - **V2**（✅ 0.2.0 已交付）：BYPASS 绕改检测、嵌套子状态机（会签/或签/count）、Reactive/WebFlux 支持
-- **后续候选**：tryFire 批量补偿 API、状态机可视化导出（DOT/Mermaid）、与 data-audit 的 binlog 级 BYPASS 合流
+- **V3**（✅ 0.3.0 已交付）：Mermaid/DOT 可视化导出与 REST 端点、availableActions 可操作视图、冲突补偿策略 SPI
+- **后续候选**：tryFire 批量补偿 API、与 data-audit 的 binlog 级 BYPASS 合流、Spring Native/AOT 支持
 
 ## 十四、已知限制
 

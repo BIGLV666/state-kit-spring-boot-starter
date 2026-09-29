@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS t_retry (
     status VARCHAR(32)
 );
 
+CREATE TABLE IF NOT EXISTS t_comp (
+    id BIGINT PRIMARY KEY,
+    status VARCHAR(32)
+);
+
 CREATE TABLE IF NOT EXISTS t_wf (
     id BIGINT PRIMARY KEY,
     status VARCHAR(32)
