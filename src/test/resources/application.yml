@@ -18,6 +18,10 @@ state-kit:
   history:
     enabled: false
   operator: auto
+  timers:
+    polling-enabled: false
+    poll-interval: 1s
+    batch-size: 50
   machines:
     # 主测试状态机：覆盖单源 / 多源 / 守卫 / 动作 / 冲突抛异常
     order:
@@ -68,6 +72,32 @@ state-kit:
       transitions:
         - { from: A, event: GO, to: B }
         - { from: B, event: GO, to: D }
+    # 0.5.0：停留超时自动流转（扫描器测试，polling 关闭，测试手动 scanOnce）
+    timerOrder:
+      state-type: io.github.biglv666.statekit.testapp.OrderStatus
+      table: t_timer_order
+      timers:
+        - { from: CREATED, after: 30m, event: CANCEL, since-column: create_time }
+      transitions:
+        - { from: CREATED, event: PAY, to: PAID }
+        - { from: CREATED, event: CANCEL, to: CANCELLED, action: timerCancelAction }
+    # 0.5.0：String 主键 + 独立 timer 事件
+    timerStr:
+      state-type: io.github.biglv666.statekit.testapp.FlowStatus
+      id-type: java.lang.String
+      table: t_timer_str
+      timers:
+        - { from: A, after: 10m, event: GO, since-column: create_time }
+      transitions:
+        - { from: A, event: GO, to: B }
+    # 0.5.0：守卫拒绝 → 下轮重试语义
+    timerG:
+      state-type: io.github.biglv666.statekit.testapp.FlowStatus
+      table: t_timer_g
+      timers:
+        - { from: A, after: 5m, event: GO, since-column: create_time }
+      transitions:
+        - { from: A, event: GO, to: B, guard: timerGateGuard }
     # 0.3.0：补偿策略（GO: A→B、B→D，并发推进后按策略决策去向）
     compFlow:
       state-type: io.github.biglv666.statekit.testapp.FlowStatus

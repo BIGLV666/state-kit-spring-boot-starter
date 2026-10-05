@@ -50,6 +50,7 @@ public final class DefinitionBuilder<S extends Enum<S>> {
     private SubMachineBinding subBinding;
     private boolean reactive;
     private String compensation;
+    private final List<TimerSpec> timers = new ArrayList<>();
 
     public DefinitionBuilder(String name, Class<S> stateType) {
         this.name = name;
@@ -160,6 +161,17 @@ public final class DefinitionBuilder<S extends Enum<S>> {
     }
 
     /**
+     * 停留超时自动流转（0.5.0+）：实体在 {@code from} 状态停留超过 {@code after} 后，
+     * 扫描器以常规 fire 语义自动触发 {@code event}。到期判定基于业务表时间列扫描，
+     * {@code sinceColumn} 必须只在进入该状态时更新（详见 {@link TimerSpec}）。
+     * 声明任一 timer 即装配扫描器；仅支持默认 JDBC 存储，不支持 reactive 通道。
+     */
+    public DefinitionBuilder<S> timer(S from, String event, java.time.Duration after, String sinceColumn) {
+        this.timers.add(new TimerSpec(from.name(), after, event, sinceColumn));
+        return this;
+    }
+
+    /**
      * 为最近一次声明的 transition 补描述与期望 param（0.3.0+），
      * 供 availableActions 与导出用。
      */
@@ -219,6 +231,7 @@ public final class DefinitionBuilder<S extends Enum<S>> {
             }
         }
         return new MachineDefinition(name, stateType, idType, table, statusColumn, idColumn,
-                conflictStrategy, transitions, versionColumn, retry, subBinding, reactive, compensation);
+                conflictStrategy, transitions, versionColumn, retry, subBinding, reactive, compensation,
+                timers);
     }
 }

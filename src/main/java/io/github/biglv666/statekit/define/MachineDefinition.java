@@ -28,6 +28,8 @@ public final class MachineDefinition {
     private final boolean reactive;
     /** 冲突补偿策略 bean 名，未声明为 null（0.3.0+） */
     private final String compensation;
+    /** 停留超时自动流转声明，未声明为空列表（0.5.0+） */
+    private final List<TimerSpec> timers;
 
     public MachineDefinition(String name, Class<? extends Enum<?>> stateType, Class<?> idType,
                              String table, String statusColumn, String idColumn,
@@ -52,6 +54,17 @@ public final class MachineDefinition {
                              ConflictStrategy conflictStrategy, List<TransitionSpec> transitions,
                              String versionColumn, RetryPolicy retry,
                              SubMachineBinding subBinding, boolean reactive, String compensation) {
+        this(name, stateType, idType, table, statusColumn, idColumn, conflictStrategy, transitions,
+                versionColumn, retry, subBinding, reactive, compensation, List.of());
+    }
+
+    /** 0.5.0 全参构造 */
+    public MachineDefinition(String name, Class<? extends Enum<?>> stateType, Class<?> idType,
+                             String table, String statusColumn, String idColumn,
+                             ConflictStrategy conflictStrategy, List<TransitionSpec> transitions,
+                             String versionColumn, RetryPolicy retry,
+                             SubMachineBinding subBinding, boolean reactive, String compensation,
+                             List<TimerSpec> timers) {
         this.name = name;
         this.stateType = stateType;
         this.idType = idType;
@@ -65,6 +78,7 @@ public final class MachineDefinition {
         this.subBinding = subBinding;
         this.reactive = reactive;
         this.compensation = compensation;
+        this.timers = timers == null ? List.of() : List.copyOf(timers);
     }
 
     /** 状态机名，即 Bean 名，全局唯一 */
@@ -130,5 +144,10 @@ public final class MachineDefinition {
     /** 冲突补偿策略 bean 名，未声明为 null（0.3.0+） */
     public String getCompensation() {
         return compensation;
+    }
+
+    /** 停留超时自动流转声明，未声明为空列表（0.5.0+） */
+    public List<TimerSpec> getTimers() {
+        return timers;
     }
 }

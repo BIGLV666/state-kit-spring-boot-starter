@@ -59,6 +59,25 @@ public class TestHooksConfig {
         return tx -> !Boolean.TRUE.equals(tx.param("reject", Boolean.class));
     }
 
+    /** 超时取消动作：写 note 列，供扫描器测试断言动作确实执行 */
+    @Bean
+    public StateAction<OrderStatus, Long> timerCancelAction(JdbcTemplate jdbcTemplate) {
+        return tx -> jdbcTemplate.update("UPDATE t_timer_order SET note = ? WHERE id = ?",
+                "timer-cancelled", tx.entityId());
+    }
+
+    /** 超时守卫开关：gate 关闭时拒绝（验证守卫拒绝 → 下轮重试语义） */
+    @Bean
+    public StateGuard<io.github.biglv666.statekit.testapp.FlowStatus, Long> timerGateGuard() {
+        return tx -> !GateHolder.closed.get();
+    }
+
+    /** 超时守卫的用例开关 */
+    public static final class GateHolder {
+        public static final java.util.concurrent.atomic.AtomicBoolean closed =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+    }
+
     /** 自爆动作：先写 note 列再抛异常，验证整体回滚 */
     @Bean
     public StateAction<TaskStatus, Long> boomAction(JdbcTemplate jdbcTemplate) {

@@ -125,6 +125,16 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
             }
         }
 
+        // 3.7 停留超时扫描（0.5.0+）同样依赖默认 JDBC 存储
+        if (beanFactory.getBeanNamesForType(StateStore.class, false, false).length > 0) {
+            for (MachineDefinition definition : definitions.values()) {
+                if (!definition.getTimers().isEmpty()) {
+                    throw new IllegalStateException("状态机 [%s] 的停留超时扫描（timers）依赖默认 JDBC 存储，"
+                            + "不能与自定义 StateStore Bean 共存".formatted(definition.getName()));
+                }
+            }
+        }
+
         // 4. 注册动态 Bean
         if (!(beanFactory instanceof BeanDefinitionRegistry registry)) {
             throw new IllegalStateException("state-kit 需要 BeanDefinitionRegistry 类型的容器");
@@ -145,6 +155,56 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
             // 0.3.0：可视化导出器 bean（<machine名>Exporter）
             registerExporterBean(registry, runtime, definition);
         }
+
+        // 0.5.0：任一机器声明 timers 时装配停留超时扫描器（声明即启用）
+        if (definitions.values().stream().anyMatch(d -> !d.getTimers().isEmpty())) {
+            registerTimerScannerBean(registry, beanFactory, definitions, properties);
+            log.info("state-kit 检测到停留超时声明（timers），已装配 TimerScanner（轮询 {}）",
+                    properties.getTimers().isPollingEnabled() ? "开启" : "关闭，请由外部调度器调用 scanOnce()");
+        }
+    }
+
+    /** 注册停留超时扫描器 bean（0.5.0+）：机器 Bean 在实例化期按名解析 */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void registerTimerScannerBean(BeanDefinitionRegistry registry,
+                                          ConfigurableListableBeanFactory beanFactory,
+                                          Map<String, MachineDefinition> definitions,
+                                          StateKitProperties properties) {
+        String beanName = "stateKitTimerScanner";
+        if (registry.containsBeanDefinition(beanName)) {
+            throw new IllegalStateException("Bean 名 [stateKitTimerScanner] 与容器已有 Bean 冲突，"
+                    + "该名由 state-kit 的停留超时扫描器保留");
+        }
+        StateKitProperties.TimersProperties timersProps = properties.getTimers();
+        RootBeanDefinition beanDefinition = new RootBeanDefinition();
+        beanDefinition.setTargetType(ResolvableType.forClass(
+                io.github.biglv666.statekit.timer.TimerScanner.class));
+        beanDefinition.setBeanClassName(io.github.biglv666.statekit.timer.TimerScanner.class.getName());
+        beanDefinition.setRole(BeanDefinition.ROLE_APPLICATION);
+        beanDefinition.setInstanceSupplier(() -> {
+            Map<String, MachineDefinition> timered = new LinkedHashMap<>();
+            definitions.forEach((name, definition) -> {
+                if (!definition.getTimers().isEmpty()) {
+                    timered.put(name, definition);
+                }
+            });
+            java.util.function.Function<String, io.github.biglv666.statekit.StateMachine<Object, Object>> resolver =
+                    name -> (io.github.biglv666.statekit.StateMachine<Object, Object>) beanFactory.getBean(name);
+            org.springframework.jdbc.core.JdbcTemplate scanJdbc = new org.springframework.jdbc.core.JdbcTemplate(
+                    timersProps.getScanDatasourceRef() == null || timersProps.getScanDatasourceRef().isBlank()
+                            ? beanFactory.getBean(DataSource.class)
+                            : beanFactory.getBean(timersProps.getScanDatasourceRef(), DataSource.class));
+            io.github.biglv666.statekit.timer.TimerScanner.StateKitTimerOptions options =
+                    new io.github.biglv666.statekit.timer.TimerScanner.StateKitTimerOptions(
+                            timersProps.isPollingEnabled(), timersProps.getPollInterval(),
+                            timersProps.getBatchSize(), timersProps.getSlowScanThreshold());
+            io.github.biglv666.statekit.metrics.FireMetrics metrics = beanFactory
+                    .getBeanProvider(io.github.biglv666.statekit.metrics.FireMetrics.class)
+                    .getIfAvailable();
+            return new io.github.biglv666.statekit.timer.TimerScanner(
+                    timered, resolver, scanJdbc, options, metrics);
+        });
+        registry.registerBeanDefinition(beanName, beanDefinition);
     }
 
     /** 注册可视化导出器 bean（<machine名>Exporter），REST 端点按名消费 */
@@ -248,6 +308,11 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
         HistoryRecorder historyRecorder = beanFactory.getBeanProvider(HistoryRecorder.class)
                 .getIfAvailable();
 
+        // fire 埋点（0.4.0+）：micrometer 装配时存在，缺失为 null → 构造器内兜底 NOOP
+        io.github.biglv666.statekit.metrics.FireMetrics metrics = beanFactory
+                .getBeanProvider(io.github.biglv666.statekit.metrics.FireMetrics.class)
+                .getIfAvailable();
+
         // 嵌套子机器：装配聚合器（聚合判定走 JDBC 统计，父回发走父机器常规 fire）
         io.github.biglv666.statekit.nested.SubMachineAggregator aggregator = null;
         if (runtime.getDefinition().getSubBinding() != null) {
@@ -268,7 +333,8 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
                 historyRecorder,
                 eventPublisher,
                 beanFactory,
-                aggregator);
+                aggregator,
+                metrics);
     }
 
     /**
@@ -339,7 +405,9 @@ public class StateMachineRegistrar implements BeanDefinitionRegistryPostProcesso
                 beanFactory.getBeanProvider(TraceIdResolver.class).getIfAvailable(),
                 historyRecorder,
                 eventPublisher,
-                beanFactory);
+                beanFactory,
+                beanFactory.getBeanProvider(io.github.biglv666.statekit.metrics.FireMetrics.class)
+                        .getIfAvailable());
     }
 
     /** JdbcTemplate 解析：优先复用容器已有 Bean（共享数据源配置），否则按 DataSource 新建 */

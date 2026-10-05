@@ -49,6 +49,8 @@ public class DefaultReactiveStateMachine<S extends Enum<S>, ID> implements React
     private final ApplicationEventPublisher eventPublisher;
     private final org.springframework.beans.factory.config.ConfigurableListableBeanFactory beanFactory;
     private final Map<String, Object> hookCache = new LinkedHashMap<>();
+    /** fire 埋点（0.4.0+）：无 micrometer 环境时为 NOOP，零开销 */
+    private final io.github.biglv666.statekit.metrics.FireMetrics metrics;
 
     public DefaultReactiveStateMachine(MachineRuntime<S> runtime, ReactiveStateStore stateStore,
                                        TransactionalOperator transactionalOperator,
@@ -56,6 +58,18 @@ public class DefaultReactiveStateMachine<S extends Enum<S>, ID> implements React
                                        ReactiveHistoryRecorder historyRecorder,
                                        ApplicationEventPublisher eventPublisher,
                                        org.springframework.beans.factory.config.ConfigurableListableBeanFactory beanFactory) {
+        this(runtime, stateStore, transactionalOperator, operatorResolver, traceIdResolver,
+                historyRecorder, eventPublisher, beanFactory, null);
+    }
+
+    /** 0.4.0+：带 fire 埋点的完整构造器 */
+    public DefaultReactiveStateMachine(MachineRuntime<S> runtime, ReactiveStateStore stateStore,
+                                       TransactionalOperator transactionalOperator,
+                                       OperatorResolver operatorResolver, TraceIdResolver traceIdResolver,
+                                       ReactiveHistoryRecorder historyRecorder,
+                                       ApplicationEventPublisher eventPublisher,
+                                       org.springframework.beans.factory.config.ConfigurableListableBeanFactory beanFactory,
+                                       io.github.biglv666.statekit.metrics.FireMetrics metrics) {
         this.runtime = runtime;
         this.stateStore = stateStore;
         this.transactionalOperator = transactionalOperator;
@@ -64,6 +78,8 @@ public class DefaultReactiveStateMachine<S extends Enum<S>, ID> implements React
         this.historyRecorder = historyRecorder;
         this.eventPublisher = eventPublisher;
         this.beanFactory = beanFactory;
+        this.metrics = metrics == null
+                ? io.github.biglv666.statekit.metrics.FireMetrics.NOOP : metrics;
     }
 
     @Override
@@ -73,10 +89,47 @@ public class DefaultReactiveStateMachine<S extends Enum<S>, ID> implements React
 
     @Override
     public Mono<Void> fire(ID id, String event, FireOptions options, FireArg... args) {
-        FireTokens tokens = splitArgs(event, args);
+        long start = System.nanoTime();
+        if (metrics == io.github.biglv666.statekit.metrics.FireMetrics.NOOP) {
+            // 无指标快路径：与 0.3.0 行为完全一致，零额外包装
+            FireTokens tokens = splitArgs(event, args);
+            FireOptions opts = options == null ? FireOptions.DEFAULT : options;
+            Mono<Void> pipeline = doFire(id, event, tokens, opts).then();
+            return transactionalOperator != null ? transactionalOperator.transactional(pipeline) : pipeline;
+        }
+        // 埋点路径：doFire 产出 outcome（success/conflict_log），异常在 doOnError 归因；
+        // 记录在事务边界之外（doFinally）——提交失败不计成功
+        FireTokens tokens;
+        try {
+            tokens = splitArgs(event, args);
+        } catch (RuntimeException e) {
+            metrics.record(runtime.name(), event,
+                    io.github.biglv666.statekit.metrics.FireMetrics.fromOf(e), null,
+                    io.github.biglv666.statekit.metrics.FireMetrics.outcomeOf(e),
+                    System.nanoTime() - start);
+            throw e;
+        }
         FireOptions opts = options == null ? FireOptions.DEFAULT : options;
-        Mono<Void> pipeline = doFire(id, event, tokens, opts);
-        return transactionalOperator != null ? transactionalOperator.transactional(pipeline) : pipeline;
+        java.util.concurrent.atomic.AtomicReference<FireOutcome> outcomeRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Mono<Void> pipeline = doFire(id, event, tokens, opts)
+                .doOnNext(outcomeRef::set)
+                .then();
+        if (transactionalOperator != null) {
+            pipeline = transactionalOperator.transactional(pipeline);
+        }
+        return pipeline
+                .doOnError(e -> outcomeRef.compareAndSet(null, FireOutcome.error(e)))
+                .doFinally(signal -> {
+                    if (signal == reactor.core.publisher.SignalType.CANCEL) {
+                        return; // 订阅取消：未完成流转，不记录
+                    }
+                    FireOutcome outcome = outcomeRef.get();
+                    if (outcome != null) {
+                        metrics.record(runtime.name(), event, outcome.from(), outcome.to(),
+                                outcome.outcome(), System.nanoTime() - start);
+                    }
+                });
     }
 
     @Override
@@ -86,7 +139,8 @@ public class DefaultReactiveStateMachine<S extends Enum<S>, ID> implements React
                 .onErrorResume(StateConflictException.class, e -> Mono.just(false));
     }
 
-    private Mono<Void> doFire(ID id, String event, FireTokens tokens, FireOptions options) {
+    /** 流转主管道：正常完成时产出唯一一条 outcome（success / conflict_log），失败以 error 信号传播 */
+    private Mono<FireOutcome> doFire(ID id, String event, FireTokens tokens, FireOptions options) {
         String machine = runtime.name();
         return stateStore.readState(id)
                 .switchIfEmpty(Mono.error(() -> new IllegalTransitionException(machine, null, event, Set.of())))
@@ -105,14 +159,32 @@ public class DefaultReactiveStateMachine<S extends Enum<S>, ID> implements React
                                     .flatMap(actual -> {
                                         if (runtime.getDefinition().getConflictStrategy()
                                                 == io.github.biglv666.statekit.ConflictStrategy.LOG) {
-                                            return Mono.empty();
+                                            return Mono.just(FireOutcome.of(
+                                                    io.github.biglv666.statekit.metrics.FireMetrics.OUTCOME_CONFLICT_LOG,
+                                                    fromName, null));
                                         }
                                         return Mono.error(new StateConflictException(machine, id, fromName, actual));
                                     });
                         }
-                        return complete(id, event, options, fromName, spec, tx);
+                        return complete(id, event, options, fromName, spec, tx)
+                                .thenReturn(FireOutcome.of(
+                                        io.github.biglv666.statekit.metrics.FireMetrics.OUTCOME_SUCCESS,
+                                        fromName, spec.getTo()));
                     });
                 });
+    }
+
+    /** fire 结果快照：outcome + from/to tag 取值，异常路径经 error 工厂从异常字段提取 */
+    private record FireOutcome(String outcome, String from, String to) {
+
+        static FireOutcome of(String outcome, String from, String to) {
+            return new FireOutcome(outcome, from, to);
+        }
+
+        static FireOutcome error(Throwable e) {
+            return new FireOutcome(io.github.biglv666.statekit.metrics.FireMetrics.outcomeOf(e),
+                    io.github.biglv666.statekit.metrics.FireMetrics.fromOf(e), null);
+        }
     }
 
     /** 守卫 → CAS；守卫 error/False 均拒绝 */

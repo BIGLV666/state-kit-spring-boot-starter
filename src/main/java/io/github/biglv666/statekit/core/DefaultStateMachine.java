@@ -68,6 +68,8 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
     private final HistoryRecorder historyRecorder;
     private final ApplicationEventPublisher eventPublisher;
     private final ConfigurableListableBeanFactory beanFactory;
+    /** fire 埋点（0.4.0+）：无 micrometer 环境时为 NOOP，零开销 */
+    private final io.github.biglv666.statekit.metrics.FireMetrics metrics;
 
     public DefaultStateMachine(MachineRuntime<S> runtime, StateStore stateStore,
                                TransactionTemplate transactionTemplate,
@@ -89,6 +91,20 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
                                ApplicationEventPublisher eventPublisher,
                                ConfigurableListableBeanFactory beanFactory,
                                io.github.biglv666.statekit.nested.SubMachineAggregator aggregator) {
+        this(runtime, stateStore, transactionTemplate, operatorResolver, traceIdResolver,
+                historyRecorder, eventPublisher, beanFactory, aggregator, null);
+    }
+
+    /** 0.4.0+：带 fire 埋点的完整构造器 */
+    public DefaultStateMachine(MachineRuntime<S> runtime, StateStore stateStore,
+                               TransactionTemplate transactionTemplate,
+                               OperatorResolver operatorResolver,
+                               io.github.biglv666.statekit.context.TraceIdResolver traceIdResolver,
+                               HistoryRecorder historyRecorder,
+                               ApplicationEventPublisher eventPublisher,
+                               ConfigurableListableBeanFactory beanFactory,
+                               io.github.biglv666.statekit.nested.SubMachineAggregator aggregator,
+                               io.github.biglv666.statekit.metrics.FireMetrics metrics) {
         this.runtime = runtime;
         this.stateStore = stateStore;
         this.transactionTemplate = transactionTemplate;
@@ -98,6 +114,8 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
         this.eventPublisher = eventPublisher;
         this.beanFactory = beanFactory;
         this.aggregator = aggregator;
+        this.metrics = metrics == null
+                ? io.github.biglv666.statekit.metrics.FireMetrics.NOOP : metrics;
     }
 
     private final io.github.biglv666.statekit.nested.SubMachineAggregator aggregator;
@@ -109,13 +127,25 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
 
     @Override
     public void fire(ID id, String event, FireOptions options, FireArg... args) {
-        FireTokens tokens = splitArgs(event, args);
-        FireOptions opts = options == null ? FireOptions.DEFAULT : options;
-        if (transactionTemplate != null) {
-            transactionTemplate.executeWithoutResult(status -> doFire(id, event, tokens, opts));
-        } else {
-            // 容器无事务管理器时退化为逐语句自动提交（历史与 CAS 不再原子，见 README 说明）
-            doFire(id, event, tokens, opts);
+        long start = System.nanoTime();
+        try {
+            FireTokens tokens = splitArgs(event, args);
+            FireOptions opts = options == null ? FireOptions.DEFAULT : options;
+            if (transactionTemplate != null) {
+                transactionTemplate.executeWithoutResult(status -> doFire(id, event, tokens, opts, start));
+            } else {
+                // 容器无事务管理器时退化为逐语句自动提交（历史与 CAS 不再原子，见 README 说明）
+                doFire(id, event, tokens, opts, start);
+            }
+            // 正常返回路径的 outcome（success/conflict_log/compensation_*）由 doFire 内部记录
+        } catch (RuntimeException e) {
+            // 异常路径（illegal/guard_rejected/conflict/error）统一在此归因记录；
+            // 每次 fire 恰好一条记录，tryFire 吞掉的冲突同样计数
+            metrics.record(runtime.name(), event,
+                    io.github.biglv666.statekit.metrics.FireMetrics.fromOf(e), null,
+                    io.github.biglv666.statekit.metrics.FireMetrics.outcomeOf(e),
+                    System.nanoTime() - start);
+            throw e;
         }
     }
 
@@ -130,7 +160,7 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
         }
     }
 
-    private void doFire(ID id, String event, FireTokens tokens, FireOptions options) {
+    private void doFire(ID id, String event, FireTokens tokens, FireOptions options, long startNanos) {
         String machine = runtime.name();
         RetryPolicy retry = runtime.getDefinition().getRetry();
         int attempts = retry == null ? 1 : retry.totalAttempts();
@@ -178,6 +208,9 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
 
             if (affected > 0) {
                 complete(id, event, tokens, options, fromName, spec, tx);
+                metrics.record(machine, event, fromName, spec.getTo(),
+                        io.github.biglv666.statekit.metrics.FireMetrics.OUTCOME_SUCCESS,
+                        System.nanoTime() - startNanos);
                 return;
             }
 
@@ -187,11 +220,15 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
             if (runtime.getDefinition().getConflictStrategy() == ConflictStrategy.LOG) {
                 log.warn("状态机 [{}] 实体 [{}] 事件 [{}] CAS 未命中: 期望 [{}], 实际 [{}]（conflict-strategy=log, 不抛异常）",
                         machine, id, event, fromName, actual);
+                metrics.record(machine, event, fromName, null,
+                        io.github.biglv666.statekit.metrics.FireMetrics.OUTCOME_CONFLICT_LOG,
+                        System.nanoTime() - startNanos);
                 return;
             }
             if (attempt < attempts) {
                 log.info("状态机 [{}] 实体 [{}] 事件 [{}] 第 {} 次尝试未命中（期望 [{}], 实际 [{}]），{}ms 后重试",
                         machine, id, event, attempt, fromName, actual, retry.backoffMs());
+                metrics.recordRetry(machine, event);
                 if (retry.backoffMs() > 0) {
                     try {
                         Thread.sleep(retry.backoffMs());
@@ -203,8 +240,14 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
                 continue;
             }
 
-            // 补偿策略判定（0.3.0+）
-            if (compensationDepth < 3 && compensate(id, event, fromName, actual, options, compensationDepth)) {
+            // 补偿策略判定（0.3.0+）：返回补偿 outcome（compensation_retry/compensation_schedule），
+            // null = 放弃（abort/无策略/策略异常）→ 抛冲突由 fire 的异常归因记录
+            String compensationOutcome = compensationDepth < 3
+                    ? compensate(id, event, fromName, actual, options, compensationDepth)
+                    : null;
+            if (compensationOutcome != null) {
+                metrics.record(machine, event, fromName, null, compensationOutcome,
+                        System.nanoTime() - startNanos);
                 return; // 调度补偿：fire 正常返回
             }
             if (compensationDepth >= 3) {
@@ -217,19 +260,20 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
     /**
      * 补偿策略判定（0.3.0+）：机器声明了 compensation bean 且策略返回非 abort 时执行补偿。
      * retryWith 以新事件重跑完整 fire 流程（再冲突时回调策略，框架限 3 次防失控）；
-     * schedule 发布调度事件并正常返回；abort / 无策略 / 策略异常返回 false → 调用方抛冲突。
+     * schedule 发布调度事件并正常返回；abort / 无策略 / 策略异常返回 null → 调用方抛冲突。
      *
-     * @return true 已按调度处理（fire 正常返回）；false 应继续抛 StateConflictException
+     * @return {@link FireMetrics#OUTCOME_COMPENSATION_RETRY} / {@link FireMetrics#OUTCOME_COMPENSATION_SCHEDULE}；
+     *         null 应继续抛 StateConflictException
      */
-    private boolean compensate(ID id, String event, String fromName, String actual, FireOptions options,
-                               int depth) {
+    private String compensate(ID id, String event, String fromName, String actual, FireOptions options,
+                              int depth) {
         String beanName = runtime.getDefinition().getCompensation();
         if (beanName == null) {
-            return false;
+            return null;
         }
         io.github.biglv666.statekit.compensation.CompensationPolicy policy = resolveCompensation(beanName);
         if (policy == null) {
-            return false;
+            return null;
         }
         String machine = runtime.name();
         java.util.Set<String> allowed = actual == null
@@ -259,22 +303,32 @@ public class DefaultStateMachine<S extends Enum<S>, ID> implements StateMachine<
             } finally {
                 COMPENSATION_DEPTH.set(depth);
             }
-            return true; // 补偿已推进（或其异常向上传播），外层不再抛冲突
+            return io.github.biglv666.statekit.metrics.FireMetrics.OUTCOME_COMPENSATION_RETRY;
         }
         if (decision instanceof io.github.biglv666.statekit.compensation.CompensationDecision.Schedule s) {
-            String operatorId = operatorResolver == null ? null : operatorResolver.resolve();
-            String traceId = traceIdResolver == null ? null : traceIdResolver.resolve();
             eventPublisher.publishEvent(new io.github.biglv666.statekit.event.CompensationScheduledEvent(
                     machine, id, s.event(), s.delayMs(), fromName, actual, LocalDateTime.now()));
-            return true; // 调度补偿：fire 正常返回，不抛异常
+            return io.github.biglv666.statekit.metrics.FireMetrics.OUTCOME_COMPENSATION_SCHEDULE;
         }
-        return false; // Abort
+        return null; // Abort
     }
 
     /** 补偿决策落历史表（event 以 COMPENSATE: 前缀，供人工干预查询），skipHistory 仍豁免 */
     private void recordCompensation(String machine, ID id, String event, String fromName, String actual,
                                     io.github.biglv666.statekit.compensation.CompensationDecision decision,
                                     FireOptions options) {
+        // 补偿决策计数（0.4.0+）：与 history 开关无关，三分支（含 abort）全量统计
+        String decisionTag;
+        if (decision instanceof io.github.biglv666.statekit.compensation.CompensationDecision.RetryWith r) {
+            decisionTag = io.github.biglv666.statekit.metrics.FireMetrics.DECISION_RETRY_WITH;
+        } else if (decision instanceof io.github.biglv666.statekit.compensation.CompensationDecision.Schedule) {
+            decisionTag = io.github.biglv666.statekit.metrics.FireMetrics.DECISION_SCHEDULE;
+        } else {
+            decisionTag = io.github.biglv666.statekit.metrics.FireMetrics.DECISION_ABORT;
+        }
+        metrics.recordCompensation(machine, event,
+                actual == null ? fromName : actual, decisionTag);
+
         if (historyRecorder == null || options.isSkipHistory()) {
             return;
         }

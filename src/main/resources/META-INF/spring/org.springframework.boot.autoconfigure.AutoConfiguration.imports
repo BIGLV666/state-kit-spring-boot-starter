@@ -1,1 +1,2 @@
 io.github.biglv666.statekit.config.StateKitAutoConfiguration
+io.github.biglv666.statekit.config.StateKitObservabilityAutoConfiguration

@@ -18,6 +18,11 @@ public class StateMachineExporter {
         this.runtime = runtime;
     }
 
+    /** 所属机器运行时（0.4.0+ 供 Actuator 端点读取机器定义） */
+    public MachineRuntime<?> runtime() {
+        return runtime;
+    }
+
     /**
      * 导出为 Mermaid stateDiagram-v2 文本。
      * 终态标 [*] 双向连线，边上标注 event，action/guard 以注释角标呈现。

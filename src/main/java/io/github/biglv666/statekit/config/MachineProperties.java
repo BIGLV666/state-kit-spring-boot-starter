@@ -49,6 +49,9 @@ public class MachineProperties {
     /** 冲突补偿策略 bean 名（0.3.0+，可选） */
     private String compensation;
 
+    /** 停留超时自动流转声明（0.5.0+，可选；声明任一条即装配扫描器） */
+    private List<TimerProperties> timers = new ArrayList<>();
+
     public Class<? extends Enum<?>> getStateType() {
         return stateType;
     }
@@ -145,6 +148,14 @@ public class MachineProperties {
         this.compensation = compensation;
     }
 
+    public List<TimerProperties> getTimers() {
+        return timers;
+    }
+
+    public void setTimers(List<TimerProperties> timers) {
+        this.timers = timers;
+    }
+
     /** 冲突自动重试声明（0.2.0+） */
     public static class RetryProperties {
 
@@ -238,6 +249,54 @@ public class MachineProperties {
 
         public void setOnCompleteEvent(String onCompleteEvent) {
             this.onCompleteEvent = onCompleteEvent;
+        }
+    }
+
+    /** 停留超时自动流转声明（0.5.0+），见 {@link TimerSpec} 的精确性边界 */
+    public static class TimerProperties {
+
+        /** 触发条件状态（实体当前停留的状态） */
+        private String from;
+
+        /** 停留时长阈值（Spring Boot Duration 绑定：30m / 12h / 45s 等），必须为正 */
+        private java.time.Duration after;
+
+        /** 到期后触发的事件，必须是 from 状态的合法出边 */
+        private String event;
+
+        /** 业务表中"进入该状态时间"的列名，必须只在进入该状态时更新 */
+        private String sinceColumn;
+
+        public String getFrom() {
+            return from;
+        }
+
+        public void setFrom(String from) {
+            this.from = from;
+        }
+
+        public java.time.Duration getAfter() {
+            return after;
+        }
+
+        public void setAfter(java.time.Duration after) {
+            this.after = after;
+        }
+
+        public String getEvent() {
+            return event;
+        }
+
+        public void setEvent(String event) {
+            this.event = event;
+        }
+
+        public String getSinceColumn() {
+            return sinceColumn;
+        }
+
+        public void setSinceColumn(String sinceColumn) {
+            this.sinceColumn = sinceColumn;
         }
     }
 

@@ -4,7 +4,7 @@
 
 轻量级**声明式状态流转** Spring Boot Starter：业务只在 yml（或 Java DSL）里声明流转规则，框架启动时动态生成状态机 Bean；以数据库 **CAS 条件更新**保证并发正确，以**唯一写入口**保证状态不被绕改。**核心零建表、零业务流程类、零必选依赖。**
 
-> **0.3.0 新增**：Mermaid/DOT 状态图导出与 REST 端点、`availableActions()` 可操作视图（event 描述/守卫/期望 param）、冲突补偿策略 SPI（重路由新事件/放弃/延迟调度，决策落历史表）。**0.2.0 新增**：冲突自动重试、乐观锁双保险、`skipHistory`/`tryFire` 重载、状态停留时长统计、BYPASS 绕改检测、嵌套子状态机（会签/或签/满 n 放行）、Reactive/WebFlux 通道（R2DBC）。见第九、十二节。
+> **0.5.0 新增**：停留超时自动流转（timers）——声明"在某状态停留超过 N 时长自动触发事件"，内置轮询 + `scanOnce()` 对接外部调度，CAS 天然集群幂等，扫描支持从库与慢扫描告警。**0.4.0 新增**：Micrometer 可观测性——`statekit.fire` 结果/耗时指标（7 种 outcome 归因）、重试与补偿决策计数、Actuator 健康检查与 `/actuator/statekit` 端点，全部条件装配。**0.3.0 新增**：Mermaid/DOT 状态图导出与 REST 端点、`availableActions()` 可操作视图（event 描述/守卫/期望 param）、冲突补偿策略 SPI（重路由新事件/放弃/延迟调度，决策落历史表）。**0.2.0 新增**：冲突自动重试、乐观锁双保险、`skipHistory`/`tryFire` 重载、状态停留时长统计、BYPASS 绕改检测、嵌套子状态机（会签/或签/满 n 放行）、Reactive/WebFlux 通道（R2DBC）。见第九、十二、十三、十四节。
 
 ```
 business ──fire(id, event, args)──▶ StateMachine（框架生成的 Bean）
@@ -37,7 +37,7 @@ business ──fire(id, event, args)──▶ StateMachine（框架生成的 Bea
 </dependency>
 ```
 
-要求：JDK 17+、Spring Boot 3.x；使用方需自带 JDBC 数据源访问能力（`spring-boot-starter-jdbc`、mybatis 等任意方式，容器里有 `DataSource` 即可）。 starter 本体**零传递依赖**（autoconfigure/jdbc/tx/slf4j 全部 provided）。
+要求：JDK 17+、Spring Boot 3.x；使用方需自带 JDBC 数据源访问能力（`spring-boot-starter-jdbc`、mybatis 等任意方式，容器里有 `DataSource` 即可）。 starter 本体**零传递依赖**（autoconfigure/jdbc/tx/slf4j 全部 provided）。可选能力同理按需自带：micrometer-core + actuator（0.4.0+ 可观测性）、spring-web（0.3.0+ REST 导出端点）、spring-boot-starter-data-r2dbc（0.2.0+ Reactive 通道），缺哪个就关哪块功能。
 
 ### 2. 声明流转规则（yml 通道，推荐）
 
@@ -176,6 +176,12 @@ state-kit:
 | `state-kit.history.table-name` | `sk_transition_history` | 历史表名 |
 | `state-kit.operator` | `auto` | `auto`/`none`；自建登录态时注册自定义 `OperatorResolver` Bean 替换 |
 | `state-kit.trace.key` | `traceId` | MDC 键名；micrometer-tracing（api-governance 底座）默认即此键 |
+| `state-kit.metrics.enabled` | `true` | fire 指标开关；仅类路径有 micrometer-core 且容器有 `MeterRegistry` 时生效，否则一律 NOOP 零开销 |
+| `state-kit.timers.polling-enabled` | `true` | 内置轮询开关；`false` 时不起调度线程，由外部调度器调用 `TimerScanner#scanOnce()` |
+| `state-kit.timers.poll-interval` | `30s` | 轮询间隔 |
+| `state-kit.timers.batch-size` | `200` | 单条扫描 SQL 的 LIMIT 上限 |
+| `state-kit.timers.slow-scan-threshold` | `1s` | 慢扫描告警阈值（超时 WARN + 索引建议） |
+| `state-kit.timers.scan-datasource-ref` | 空 | 扫描专用数据源 bean 名（典型为读写分离从库）；fire 始终走主库 |
 
 IDE 补全：`META-INF/additional-spring-configuration-metadata.json` 已内置提示。
 
@@ -311,7 +317,7 @@ public StateStore redisStateStore() {
 
 ## 十一、测试
 
-`src/test` 覆盖 90 个用例（H2 内存库，`mvnw test` 一键运行），包括：
+`src/test` 覆盖 134 个用例（H2 内存库，`mvnw test` 一键运行），包括：
 
 - **并发双流转**（8 线程同 fire，CAS 保证恰好一成一败）；
 - **竞态窗口精确复现**（未提交事务持锁 + 另一线程 fire，CAS 阻塞后 WHERE 重评）；
@@ -320,7 +326,10 @@ public StateStore redisStateStore() {
 - fire 加入外部事务（提交/回滚两边界）与自开事务；
 - 多源流转、同一事件多边路由、String 主键、param/set 严格分离、SQL 注入列名拦截；
 - history 关闭零 DDL / 开启自动建表 / 建表幂等 / 历史与业务同事务回滚 / 轨迹查询；
-- 启动期校验每种错误形态（11 例）、自定义 StateStore SPI 整体替换、无登录态/无链路降级路径。
+- 启动期校验每种错误形态（11 例）、自定义 StateStore SPI 整体替换、无登录态/无链路降级路径；
+- **指标压测**（0.4.0+）：8000 次 fire 混合负载（含 8 线程屏障竞态 200 轮），meter 计数与业务侧实测严格一致、不丢不重；record 单次开销基准。
+- **停留超时**（0.5.0+）：到期触发全语义（守卫/动作/事件）、未到期与恰好到期边界、守卫拒绝下轮重试、String 主键、批量排水无遗漏、8 线程并发扫描幂等（总 success == 实体数）、多轮无遗漏无重复；
+- **超时压测**（0.5.0+）：5000 实体单次 scanOnce 排水（H2 ≈ 12.9k 实体/秒）。
 
 ## 十二、0.2.0 新特性详解
 
@@ -485,18 +494,123 @@ machines:
 - `abort()`：抛 StateConflictException，与无策略行为一致（向后兼容）；
 - 决策以 `COMPENSATE:retry:...`/`COMPENSATE:schedule:...`/`COMPENSATE:abort` 落历史表（审计痕迹），**ABORT 场景主事务回滚也保留**（补偿记录走 REQUIRES_NEW 独立事务），skipHistory 仍豁免。
 
-## 十三、版本路线
+## 十四、0.4.0 新特性详解：可观测性
+
+全部**条件装配**：micrometer-core / actuator 不在类路径时相关 Bean 一律不注册，核心零影响、零传递依赖（依赖均为 provided + optional）。
+
+### 1. fire 指标（Micrometer）
+
+容器有 `MeterRegistry` 时自动装配 `MicrometerFireMetrics`；**每次 fire 恰好一条记录**（成功失败皆记），命名与 tag：
+
+| 指标 | 类型 | tags | 说明 |
+|------|------|------|------|
+| `statekit.fire` | Timer | machine、event、from、to、outcome | 流转次数与耗时（含事务边界与重试退避） |
+| `statekit.fire.retries` | Counter | machine、event | CAS 冲突后的自动重试次数（不含首次） |
+| `statekit.compensation` | Counter | machine、event、actual、decision | 补偿策略决策分布（abort 也计） |
+
+`outcome` 七种归因：`success` / `illegal`（无出边或实体不存在）/ `guard_rejected` / `conflict`（CAS 未命中最终抛出）/ `conflict_log`（log 策略静默）/ `compensation_retry`（补偿重路由，内层 fire 另有自己的记录）/ `compensation_schedule`（延迟调度）/ 另有 `error`（动作抛出的业务异常等未知异常，from/to 记 `-`）。tag 取值全部来自启动期声明的机器/事件/状态集合，基数有界。
+
+对接 Prometheus/Grafana 零配置——引入 actuator + registry 即出现在 `/actuator/prometheus`。业务可注册自定义 `FireMetrics` Bean 整体替换（如对接自研监控）。
+
+### 2. 健康检查
+
+`StateKitHealthIndicator`（随 actuator 装配，`management.health.statekit.enabled=false` 可关）：状态恒 UP（启动期 fail-fast 校验通过才会运行到这里），details 上报机器清单与模块开关：
+
+```json
+"stateKit": {
+    "machines": ["order", "task"], "machineCount": 2, "reactiveMachineCount": 0,
+    "history": "disabled", "bypass": "off", "metrics": "enabled"
+}
+```
+
+### 3. Actuator 端点
+
+```
+GET /actuator/statekit                # 全部机器摘要（表/列/边定义/冲突策略/重试/补偿/终态）
+GET /actuator/statekit/{machine}      # 单机详情 + Mermaid 图文本
+```
+
+随 `management.endpoints.web.exposure.include` 控制暴露，接入 Spring Security 端点级管控。0.3.0 的 `/statekit/**` REST 端点**保留不变**（向后兼容）。
+
+## 十五、0.5.0 新特性详解：停留超时自动流转（timers）
+
+"订单在 CREATED 停留 30 分钟未支付自动取消"——声明即启用，到期触发走**常规 fire 语义**（路由/守卫/CAS/动作/事件/历史/补偿全部生效），框架不引入任何新表：
+
+```yaml
+machines:
+  order:
+    timers:
+      - { from: CREATED, after: 30m, event: CANCEL, since-column: create_time }
+    transitions:
+      - { from: CREATED, event: PAY, to: PAID }
+      - { from: CREATED, event: CANCEL, to: CANCELLED }
+```
+
+Java DSL：`.timer(OrderStatus.CREATED, "CANCEL", Duration.ofMinutes(30), "create_time")`。
+
+### 1. 到期判定与触发
+
+- **判定**：扫描 SQL `SELECT id FROM <业务表> WHERE status='<from>' AND <since-column> <= <now-after>`，截止时间应用侧计算后参数绑定（跨方言一致、索引友好）；
+- **触发**：对每个到期实体执行 `machine.fire(id, event)`——守卫可拒绝、动作同事务、冲突按机器策略处置、历史与指标照常记录；
+- **初始态覆盖**：判定基于业务表时间列而非框架事件，因此业务 INSERT 产生的初始态（不经过 fire）同样能被超时接管——这是 due 表方案做不到的；
+- **集群幂等免费**：多实例并发扫描同一批 → 各自 fire → CAS 恰好一成一败，无需分布式锁；压测验证 8 线程并发扫描 400 实体总 success 严格等于 400。
+
+### 2. 调度模式
+
+- **内置轮询（默认）**：`polling-enabled: true` 时以单线程 daemon 按固定间隔扫描（SmartLifecycle 管理，不依赖 `@EnableScheduling`）；
+- **外部调度**：`polling-enabled: false` 后由 XXL-Job / Quartz 等周期调用：
+
+```java
+@Autowired TimerScanner timerScanner;
+int fired = timerScanner.scanOnce();   // 一轮全量扫描，返回推进数；有进展时自动排水清空积压
+```
+
+排水语义：单次 SELECT 取满 batch-size 且本轮有 fire 成功时才继续查询；整批被守卫拒绝（无进展）立即停止，防死循环。
+
+### 3. fire 结果分类
+
+| 结果 | 处理 |
+|------|------|
+| success | 推进，下轮 WHERE 过滤自然排除 |
+| conflict / illegal | 状态已被并发推进，DEBUG 记录，下轮排除 |
+| guard_rejected | 状态未变，**下轮重试**——守卫条件满足后自动推进（语义：持续等待） |
+| 其它异常（动作失败等） | WARN 后下轮重试；持续失败会每轮 WARN，需关注 |
+
+### 4. 大表性能与数据库压力（重点）
+
+**成本模型**：有 `(status, since-column)` 组合索引时，扫描成本只与"到期实体数"成正比、与表大小无关（索引范围扫描 + LIMIT）；**没有该索引时是全表扫描，大表上每轮都是灾难**——必建。
+
+| 手段 | 配置 | 效果 |
+|------|------|------|
+| 组合索引（必建） | `ALTER TABLE t_order ADD INDEX idx_timer (status, create_time)` | 扫描成本 ∝ 到期数，与表大小无关 |
+| 扫描走从库 | `timers.scan-datasource-ref: slaveDs` | 轮询压力与主库完全隔离，fire 仍走主库 |
+| 控制扫描频率 | `timers.poll-interval: 5m` | 超时精度换轮询压力 |
+| 控制单轮批量 | `timers.batch-size: 200` | LIMIT 兜底单轮压力上限 |
+| 自监控 | `statekit.timer.scan`（Timer，machine/timer tags）+ 慢扫描 WARN（阈值 `slow-scan-threshold`，超时自动提示建索引/走从库） | 压力可观测可告警 |
+
+精确性边界：`since-column` 必须**只在进入该状态时更新**——推荐 create_time 或专用状态时间列；若用随任意字段刷新的 `ON UPDATE CURRENT_TIMESTAMP` 列，停留计时会被错误重置。
+
+### 5. 限制
+
+- 仅默认 JDBC 存储（自定义 StateStore Bean 与 timers 互斥，启动期报错）；不支持 reactive 通道（启动期报错）；
+- 扫描 SQL 的 `LIMIT` 语法适用于 MySQL/MariaDB/H2/PostgreSQL，其它数据库未验证；
+- 守卫拒绝的实体会每轮重试，拒绝原因需自行保证最终可满足（如人工处理后放行）。
+
+## 十六、版本路线
 
 - **V1.5**（✅ 0.2.0 已交付）：状态停留时长统计、乐观锁双保险、冲突自动重试、skipHistory/tryFire 重载
 - **V2**（✅ 0.2.0 已交付）：BYPASS 绕改检测、嵌套子状态机（会签/或签/count）、Reactive/WebFlux 支持
 - **V3**（✅ 0.3.0 已交付）：Mermaid/DOT 可视化导出与 REST 端点、availableActions 可操作视图、冲突补偿策略 SPI
+- **V4**（✅ 0.4.0 已交付）：Micrometer fire 指标（7 种 outcome 归因）、重试/补偿计数、Actuator 健康检查与 `/actuator/statekit` 端点
+- **V5**（✅ 0.5.0 已交付）：停留超时自动流转（timers：内置轮询 + scanOnce 外部调度 + 从库扫描 + 慢扫描告警，CAS 集群幂等）
 - **后续候选**：tryFire 批量补偿 API、与 data-audit 的 binlog 级 BYPASS 合流、Spring Native/AOT 支持
 
-## 十四、已知限制
+## 十七、已知限制
 
 - 状态机 Bean 在启动期注册，不支持运行期增删流转规则（改 yml 重启即可）；
 - Java DSL 定义 Bean 会被提前实例化，不能注入业务 Bean；
 - Reactive 通道不参与 BYPASS 检测与嵌套聚合；operatorId 在纯 WebFlux 下为 null（auth-kit 基于 ThreadLocal）；
 - 历史表 DDL 内置方言：MySQL/MariaDB 与标准（H2/PostgreSQL）两类，其它数据库未验证；
 - 不支持在同一事件上对同一状态挂不同目标（`(from, event)` 唯一性校验会拦截）；
-- BYPASS 检测只覆盖经容器 DataSource 执行的语句；binlog 级检测留给 data-audit 合流。
+- BYPASS 检测只覆盖经容器 DataSource 执行的语句；binlog 级检测留给 data-audit 合流；
+- timers 仅默认 JDBC 存储、不支持 reactive 通道；扫描 LIMIT 语法验证过的数据库为 MySQL/MariaDB/H2/PostgreSQL；`since-column` 被其它字段更新会重置停留计时（见第十五节精确性边界）。

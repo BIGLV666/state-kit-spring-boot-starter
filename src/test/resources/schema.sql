@@ -48,3 +48,22 @@ CREATE TABLE IF NOT EXISTS t_wf_item (
     status VARCHAR(32),
     workflow_id BIGINT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS t_timer_order (
+    id BIGINT PRIMARY KEY,
+    status VARCHAR(32),
+    create_time TIMESTAMP,
+    note VARCHAR(64)
+);
+
+CREATE TABLE IF NOT EXISTS t_timer_str (
+    id VARCHAR(64) PRIMARY KEY,
+    status VARCHAR(32),
+    create_time TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS t_timer_g (
+    id BIGINT PRIMARY KEY,
+    status VARCHAR(32),
+    create_time TIMESTAMP
+);

@@ -102,6 +102,7 @@ final class DefinitionValidator {
 
         validateSubBinding(definition, all);
         validateParentChain(definition, all, new HashSet<>());
+        validateTimers(definition);
 
         // 0.3.0：补偿策略 bean 存在性与类型
         if (definition.getCompensation() != null && !definition.getCompensation().isBlank()) {
@@ -127,6 +128,51 @@ final class DefinitionValidator {
             if (!reachable.contains(name)) {
                 log.warn("状态机 [{}] 状态 [{}] 没有任何入边（不会被任何流转到达），若为初始状态可忽略",
                         machine, name);
+            }
+        }
+    }
+
+    /** 停留超时声明校验（0.5.0+）：枚举成员、出边存在、时长为正、列名合法、reactive 互斥、(from,event) 去重 */
+    private static void validateTimers(MachineDefinition definition) {
+        java.util.List<io.github.biglv666.statekit.define.TimerSpec> timers = definition.getTimers();
+        if (timers.isEmpty()) {
+            return;
+        }
+        String machine = definition.getName();
+        if (definition.isReactive()) {
+            throw new IllegalStateException("状态机 [%s] 的 timers 不支持 reactive 通道，二者只能取其一"
+                    .formatted(machine));
+        }
+        Set<String> enumNames = new HashSet<>();
+        for (Object constant : definition.getStateType().getEnumConstants()) {
+            enumNames.add(((Enum<?>) constant).name());
+        }
+        Set<String> timerKeys = new HashSet<>();
+        for (io.github.biglv666.statekit.define.TimerSpec timer : timers) {
+            if (timer.from() == null || !enumNames.contains(timer.from())) {
+                throw new IllegalStateException("状态机 [%s] timer %s 的 from 状态 [%s] 不在枚举 %s 中"
+                        .formatted(machine, timer, timer.from(), definition.getStateType().getName()));
+            }
+            if (timer.after() == null || timer.after().isZero() || timer.after().isNegative()) {
+                throw new IllegalStateException("状态机 [%s] timer %s 的 after 必须为正时长"
+                        .formatted(machine, timer));
+            }
+            if (timer.event() == null || timer.event().isBlank()) {
+                throw new IllegalStateException("状态机 [%s] timer %s 的 event 不能为空"
+                        .formatted(machine, timer));
+            }
+            requireIdentifier(machine, "timers.since-column", timer.sinceColumn());
+            // 到期触发的事件必须是 from 状态的合法出边，否则每次扫描都注定非法流转
+            boolean edgeExists = definition.getTransitions().stream()
+                    .anyMatch(t -> t.getFrom().contains(timer.from()) && t.getEvent().equals(timer.event()));
+            if (!edgeExists) {
+                throw new IllegalStateException("状态机 [%s] timer 的 event [%s] 在状态 [%s] 上没有出边，"
+                        .formatted(machine, timer.event(), timer.from())
+                        + "请先声明对应的 transition");
+            }
+            if (!timerKeys.add(timer.from() + "@" + timer.event())) {
+                throw new IllegalStateException("状态机 [%s] 存在重复的 timer: [%s] + [%s]"
+                        .formatted(machine, timer.from(), timer.event()));
             }
         }
     }

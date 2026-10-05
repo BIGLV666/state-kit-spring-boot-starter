@@ -13,7 +13,7 @@
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>state-kit-spring-boot-starter</artifactId>
-    <version>0.3.0</version>
+    <version>0.5.0</version>
     <packaging>jar</packaging>
 
     <name>state-kit-spring-boot-starter</name>
@@ -85,6 +85,29 @@
         <dependency>
             <groupId>io.projectreactor</groupId>
             <artifactId>reactor-core</artifactId>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+
+        <!--
+            可观测性（0.4.0+）：全部 optional provided，类路径检测装配，
+            缺失时 FireMetrics 为 NOOP、Health/Endpoint 不注册，核心零影响。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-actuator</artifactId>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-actuator-autoconfigure</artifactId>
             <scope>provided</scope>
             <optional>true</optional>
         </dependency>

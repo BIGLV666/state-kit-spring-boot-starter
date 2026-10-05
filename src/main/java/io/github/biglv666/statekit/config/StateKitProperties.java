@@ -46,6 +46,12 @@ public class StateKitProperties {
     /** BYPASS 绕改检测配置，见 {@link BypassProperties}（0.2.0+） */
     private final BypassProperties bypass = new BypassProperties();
 
+    /** 可观测性指标配置，见 {@link MetricsProperties}（0.4.0+） */
+    private final MetricsProperties metrics = new MetricsProperties();
+
+    /** 停留超时扫描配置，见 {@link TimersProperties}（0.5.0+） */
+    private final TimersProperties timers = new TimersProperties();
+
     /** 状态机声明，key 为状态机名（即 Bean 名） */
     private Map<String, MachineProperties> machines = new LinkedHashMap<>();
 
@@ -67,6 +73,14 @@ public class StateKitProperties {
 
     public BypassProperties getBypass() {
         return bypass;
+    }
+
+    public MetricsProperties getMetrics() {
+        return metrics;
+    }
+
+    public TimersProperties getTimers() {
+        return timers;
     }
 
     public Map<String, MachineProperties> getMachines() {
@@ -143,6 +157,98 @@ public class StateKitProperties {
 
         public void setMode(String mode) {
             this.mode = mode;
+        }
+    }
+
+    /**
+     * 可观测性指标配置（0.4.0+）：fire 结果/耗时、重试与补偿决策的 micrometer 指标。
+     * 仅当类路径存在 micrometer-core 且容器有 {@code MeterRegistry} 时才真正生效，
+     * 否则一律 NOOP（零开销）——本开关用于在生效环境下强制关闭。
+     */
+    public static class MetricsProperties {
+
+        /**
+         * 是否启用 fire 指标。默认 {@code true}（类路径生效时）；设为 {@code false} 强制 NOOP。
+         */
+        private boolean enabled = true;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+    }
+
+    /**
+     * 停留超时扫描配置（0.5.0+）：仅当任一机器声明 timers 时才有实际作用。
+     * 大表调优（索引 / 间隔 / 批量 / 从库）见 README 0.5.0 章节。
+     */
+    public static class TimersProperties {
+
+        /**
+         * 是否启用内置轮询。默认 {@code true}（单线程 daemon 按固定间隔扫描）；
+         * {@code false} 时不起调度线程，由外部调度器（XXL-Job / Quartz 等）调用
+         * {@code TimerScanner#scanOnce()}。
+         */
+        private boolean pollingEnabled = true;
+
+        /** 轮询间隔，默认 30s */
+        private java.time.Duration pollInterval = java.time.Duration.ofSeconds(30);
+
+        /** 单条扫描 SQL 的 LIMIT 上限，默认 200；配合 (status, since-column) 索引控制单次扫描压力 */
+        private int batchSize = 200;
+
+        /**
+         * 慢扫描告警阈值，默认 1s；超过时 WARN 并提示建组合索引或改走从库。
+         */
+        private java.time.Duration slowScanThreshold = java.time.Duration.ofSeconds(1);
+
+        /**
+         * 扫描专用数据源 bean 名（0.5.0+，可选）：配置后扫描 SQL 走该数据源
+         * （典型为读写分离的从库），fire 仍走各机器的主库通道。留空用主数据源。
+         */
+        private String scanDatasourceRef;
+
+        public boolean isPollingEnabled() {
+            return pollingEnabled;
+        }
+
+        public void setPollingEnabled(boolean pollingEnabled) {
+            this.pollingEnabled = pollingEnabled;
+        }
+
+        public java.time.Duration getPollInterval() {
+            return pollInterval;
+        }
+
+        public void setPollInterval(java.time.Duration pollInterval) {
+            this.pollInterval = pollInterval;
+        }
+
+        public int getBatchSize() {
+            return batchSize;
+        }
+
+        public void setBatchSize(int batchSize) {
+            this.batchSize = batchSize;
+        }
+
+        public java.time.Duration getSlowScanThreshold() {
+            return slowScanThreshold;
+        }
+
+        public void setSlowScanThreshold(java.time.Duration slowScanThreshold) {
+            this.slowScanThreshold = slowScanThreshold;
+        }
+
+        public String getScanDatasourceRef() {
+            return scanDatasourceRef;
+        }
+
+        public void setScanDatasourceRef(String scanDatasourceRef) {
+            this.scanDatasourceRef = scanDatasourceRef;
         }
     }
 }

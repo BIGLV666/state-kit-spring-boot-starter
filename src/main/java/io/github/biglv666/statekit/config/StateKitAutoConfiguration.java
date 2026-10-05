@@ -195,6 +195,27 @@ public class StateKitAutoConfiguration {
                 client, properties.getHistory().getTableName());
     }
 
+    /**
+     * fire 指标（0.4.0+）：micrometer-core 在类路径且容器有 {@code MeterRegistry} 时
+     * 装配 {@code MicrometerFireMetrics}；类路径缺失、无 registry 或
+     * {@code state-kit.metrics.enabled=false} 时为 NOOP（零开销）。
+     * 业务可注册自定义 FireMetrics Bean 替换（本方法避让）。
+     */
+    @Bean
+    @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
+    @ConditionalOnMissingBean(io.github.biglv666.statekit.metrics.FireMetrics.class)
+    public io.github.biglv666.statekit.metrics.FireMetrics fireMetrics(
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistry,
+            StateKitProperties properties) {
+        if (!properties.getMetrics().isEnabled()) {
+            return io.github.biglv666.statekit.metrics.FireMetrics.NOOP;
+        }
+        io.micrometer.core.instrument.MeterRegistry registry = meterRegistry.getIfAvailable();
+        return registry == null
+                ? io.github.biglv666.statekit.metrics.FireMetrics.NOOP
+                : new io.github.biglv666.statekit.metrics.MicrometerFireMetrics(registry);
+    }
+
     /** auth-kit 类路径检测辅助（避免在本类 import auth-kit 类） */
     static final class ClassUtilsPresent {
         private ClassUtilsPresent() {

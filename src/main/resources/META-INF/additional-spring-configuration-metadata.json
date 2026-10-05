@@ -94,6 +94,43 @@
           "description": "启动幂等建表，fire 同事务写入流转历史"
         }
       ]
+    },
+    {
+      "name": "state-kit.metrics.enabled",
+      "defaults": ["true"],
+      "values": [
+        {
+          "value": "true",
+          "description": "类路径有 micrometer-core 且容器有 MeterRegistry 时启用 fire 指标（默认）"
+        },
+        {
+          "value": "false",
+          "description": "强制关闭指标（FireMetrics 为 NOOP，零开销）"
+        }
+      ]
+    },
+    {
+      "name": "state-kit.timers.polling-enabled",
+      "defaults": ["true"],
+      "values": [
+        {
+          "value": "true",
+          "description": "内置单线程 daemon 按固定间隔轮询（默认）"
+        },
+        {
+          "value": "false",
+          "description": "不起调度线程，由外部调度器调用 TimerScanner#scanOnce()"
+        }
+      ]
+    },
+    {
+      "name": "state-kit.timers.scan-datasource-ref",
+      "values": [],
+      "providers": [
+        {
+          "name": "any"
+        }
+      ]
     }
   ]
 }

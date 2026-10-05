@@ -55,12 +55,17 @@ final class MachineDefinitionConverter {
             subBinding = convertSub(name, properties.getSub());
         }
 
+        List<io.github.biglv666.statekit.define.TimerSpec> timers = properties.getTimers().stream()
+                .map(t -> new io.github.biglv666.statekit.define.TimerSpec(
+                        t.getFrom(), t.getAfter(), t.getEvent(), t.getSinceColumn()))
+                .toList();
+
         return new MachineDefinition(name, properties.getStateType(),
                 properties.getIdType() == null ? Long.class : properties.getIdType(),
                 properties.getTable(), properties.getStatusColumn(), properties.getIdColumn(),
                 strategy, transitions,
                 properties.getVersionColumn(), retry, subBinding, properties.isReactive(),
-                properties.getCompensation());
+                properties.getCompensation(), timers);
     }
 
     private static SubMachineBinding convertSub(String name, MachineProperties.SubProperties sub) {
